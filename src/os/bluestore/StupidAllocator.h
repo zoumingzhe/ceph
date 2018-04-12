@@ -53,6 +53,7 @@ public:
     uint64_t offset, uint64_t length) override;
 
   uint64_t get_free() override;
+  double get_fragmentation(uint64_t alloc_unit) override;
 
   void defragment(uint64_t alloc_unit) override;
 
