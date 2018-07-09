@@ -8527,9 +8527,7 @@ void BlueStore::_txc_finish(TransContext *txc)
     dout(10) << __func__ << " reaping empty zombie osr " << osr << dendl;
     osr->_unregister();
   }
-  logger->set(l_bluestore_fragmentation,
-    (uint64_t)(alloc->get_fragmentation(min_alloc_size) * 1000));
-}
+ }
 
 void BlueStore::_txc_release_alloc(TransContext *txc)
 {
@@ -9001,6 +8999,9 @@ void BlueStore::_kv_finalize_thread()
 
       // this is as good a place as any ...
       _reap_collections();
+
+      logger->set(l_bluestore_fragmentation,
+	  (uint64_t)(alloc->get_fragmentation(min_alloc_size) * 1000));
 
       l.lock();
     }
