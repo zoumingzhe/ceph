@@ -7,6 +7,9 @@ tasks:
     client.0:
       sha1: 12.0.0.0b2
       force-branch: master
+      domain:
+        - name: Default
+          description: Default Domain
       tenants:
         - name: admin
           description:  Admin Tenant
@@ -73,3 +76,8 @@ overrides:
         rgw swift enforce content length: true
         rgw swift account in url: true
         rgw swift versioning enabled: true
+        rgw keystone admin domain: default
+        rgw_keystone_admin_project: admin
+        rgw keystone revocation interval: 0
+        rgw_keystone_token_cache_size: 0
+        rgw_keystone_api_version: 3

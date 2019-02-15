@@ -93,9 +93,12 @@ def start_rgw(ctx, config, clients):
         if keystone_role is not None:
             if not ctx.keystone:
                 raise ConfigError('rgw must run after the keystone task')
-            url = 'http://{host}:{port}/v1/KEY_$(tenant_id)s'.format(host=endpoint.hostname,
-                                                                     port=endpoint.port)
-            ctx.keystone.create_endpoint(ctx, keystone_role, 'swift', url)
+            url = 'http://{host}:{port}/v1/AUTH_$(project_id)s'.format(host=endpoint.hostname,
+                                                                       port=endpoint.port)
+            admin_url = 'http://{host}:{port}/v1/'.format(host=endpoint.hostname, port=endpoint.port)
+            ctx.keystone.create_endpoint(ctx, keystone_role, 'object-store admin', admin_url)
+            ctx.keystone.create_endpoint(ctx, keystone_role, 'object-store internal', url)
+            ctx.keystone.create_endpoint(ctx, keystone_role, 'object-store public', url)
 
             keystone_host, keystone_port = \
                 ctx.keystone.public_endpoints[keystone_role]
