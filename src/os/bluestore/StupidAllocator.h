@@ -54,6 +54,8 @@ public:
 
   uint64_t get_free() override;
 
+  void defragment(uint64_t alloc_unit) override;
+
   void dump() override;
 
   void init_add_free(uint64_t offset, uint64_t length) override;

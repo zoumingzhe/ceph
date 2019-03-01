@@ -3349,6 +3349,10 @@ std::vector<Option> get_global_options() {
     .set_description("How frequently (in seconds) to dump information on "
       "allocation failure occurred during BlueFS space rebalance"),
 
+    Option("bluestore_allocator_defrag_interval", Option::TYPE_FLOAT, Option::LEVEL_ADVANCED)
+    .set_default(43200)
+    .set_description("How frequently (in seconds) to defragment BlueStore allocator"),
+
     Option("bluestore_spdk_mem", Option::TYPE_UINT, Option::LEVEL_DEV)
     .set_default(512)
     .set_description(""),

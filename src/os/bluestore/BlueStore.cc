@@ -8692,6 +8692,8 @@ void BlueStore::_kv_sync_thread()
   dout(10) << __func__ << " start" << dendl;
   std::unique_lock<std::mutex> l(kv_lock);
   assert(!kv_sync_started);
+  utime_t allocator_last_defrag = ceph_clock_now();
+
   kv_sync_started = true;
   kv_cond.notify_all();
   while (true) {
@@ -8837,6 +8839,14 @@ void BlueStore::_kv_sync_thread()
 		   << bluefs_extents << std::dec << dendl;
 	  synct->set(PREFIX_SUPER, "bluefs_extents", bl);
 	}
+      }
+      auto alloc_defrag_interval = cct->_conf->bluestore_allocator_defrag_interval;
+
+      if (alloc_defrag_interval &&
+	  after_flush - allocator_last_defrag >
+	  alloc_defrag_interval) {
+	allocator_last_defrag = after_flush;
+	alloc->defragment(min_alloc_size);
       }
 
       // cleanup sync deferred keys

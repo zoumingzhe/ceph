@@ -53,6 +53,10 @@ public:
 
   virtual uint64_t get_free() = 0;
 
+  virtual void defragment(uint64_t alloc_unit)
+  {
+  }
+
   virtual void shutdown() = 0;
   static Allocator *create(CephContext* cct, string type, int64_t size,
 			   int64_t block_size);
