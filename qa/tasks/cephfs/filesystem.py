@@ -140,6 +140,31 @@ class FSStatus(object):
             log.warn(json.dumps(list(self.get_all()), indent=2))  # dump for debugging
             raise RuntimeError("MDS id '{0}' not found in map".format(name))
 
+    def cmpincname(self, inc, fsname):
+        """
+        Check the fs_name and incarnation values.
+        """
+        for fs in self.map['filesystems']:
+            if fs['mdsmap']['fs_name'] == fsname:
+                for info in fs['mdsmap']['info'].values():
+                    if info['incarnation'] == inc:
+                        return True
+                    else:
+                        return False
+        return False
+
+    def hadfailover(self, status):
+        """
+        Compares two statuses for mds failovers.
+        Returns True if the statuses are matching.
+        """
+        for fs in status.map['filesystems']:
+            for info in fs['mdsmap']['info'].values():
+                if not self.cmpincname(info['incarnation'], fs['mdsmap']['fs_name']):
+                    return False
+        #all matching
+        return True
+
 class CephCluster(object):
     @property
     def admin_remote(self):
