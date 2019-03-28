@@ -79,9 +79,6 @@
 %{!?_udevrulesdir: %global _udevrulesdir /lib/udev/rules.d}
 %{!?tmpfiles_create: %global tmpfiles_create systemd-tmpfiles --create}
 %{!?python3_pkgversion: %global python3_pkgversion 3}
-# define _python_buildid macro which will expand to the empty string when
-# building with python2
-%global _python_buildid %{?_defined_if_python2_absent:%{python3_pkgversion}}
 
 # unify libexec for all targets
 %global _libexecdir %{_exec_prefix}/lib
@@ -173,8 +170,8 @@ BuildRequires:	parted
 BuildRequires:	perl
 BuildRequires:	pkgconfig
 BuildRequires:  procps
-BuildRequires:	python%{_python_buildid}
-BuildRequires:	python%{_python_buildid}-devel
+BuildRequires:	python3
+BuildRequires:	python3-devel
 BuildRequires:	snappy-devel
 BuildRequires:	sudo
 BuildRequires:	udev
@@ -190,18 +187,18 @@ BuildRequires:  librabbitmq-devel
 %endif
 %if 0%{with make_check}
 BuildRequires:  jq
-BuildRequires:	python%{_python_buildid}-bcrypt
-BuildRequires:	python%{_python_buildid}-coverage
-BuildRequires:	python%{_python_buildid}-nose
-BuildRequires:	python%{_python_buildid}-pecan
-BuildRequires:	python%{_python_buildid}-requests
-BuildRequires:	python%{_python_buildid}-six
-BuildRequires:	python%{_python_buildid}-tox
-BuildRequires:	python%{_python_buildid}-virtualenv
+BuildRequires:	python3-bcrypt
+BuildRequires:	python3-coverage
+BuildRequires:	python3-nose
+BuildRequires:	python3-pecan
+BuildRequires:	python3-requests
+BuildRequires:	python3-six
+BuildRequires:	python3-tox
+BuildRequires:	python3-virtualenv
 %if 0%{?rhel} == 7
-BuildRequires:  pyOpenSSL%{_python_buildid}
+BuildRequires:  pyOpenSSL3
 %else
-BuildRequires:  python%{_python_buildid}-pyOpenSSL
+BuildRequires:  python3-pyOpenSSL
 %endif
 BuildRequires:	socat
 %endif
@@ -235,10 +232,10 @@ BuildRequires:  openldap2-devel
 #BuildRequires:  krb5
 #BuildRequires:  krb5-devel
 BuildRequires:  cunit-devel
-BuildRequires:	python%{_python_buildid}-setuptools
-BuildRequires:	python%{_python_buildid}-Cython
-BuildRequires:	python%{_python_buildid}-PrettyTable
-BuildRequires:	python%{_python_buildid}-Sphinx
+BuildRequires:	python3-setuptools
+BuildRequires:	python3-Cython
+BuildRequires:	python3-PrettyTable
+BuildRequires:	python3-Sphinx
 BuildRequires:  rdma-core-devel
 BuildRequires:	liblz4-devel >= 1.7
 %endif
@@ -263,25 +260,25 @@ BuildRequires:	python3-devel
 BuildRequires:	python3-setuptools
 BuildRequires:	python3-Cython
 %endif
-BuildRequires:	python%{_python_buildid}-prettytable
-BuildRequires:	python%{_python_buildid}-sphinx
+BuildRequires:	python3-prettytable
+BuildRequires:	python3-sphinx
 BuildRequires:	lz4-devel >= 1.7
 %endif
 # distro-conditional make check dependencies
 %if 0%{with make_check}
 %if 0%{?fedora} || 0%{?rhel}
-BuildRequires:	python%{_python_buildid}-cherrypy
-BuildRequires:	python%{_python_buildid}-jwt
-BuildRequires:	python%{_python_buildid}-routes
-BuildRequires:	python%{_python_buildid}-werkzeug
+BuildRequires:	python3-cherrypy
+BuildRequires:	python3-jwt
+BuildRequires:	python3-routes
+BuildRequires:	python3-werkzeug
 BuildRequires:  xmlsec1
 %endif
 %if 0%{?suse_version}
-BuildRequires:	python%{_python_buildid}-CherryPy
-BuildRequires:	python%{_python_buildid}-PyJWT
-BuildRequires:	python%{_python_buildid}-Routes
-BuildRequires:	python%{_python_buildid}-Werkzeug
-BuildRequires:	python%{_python_buildid}-numpy-devel
+BuildRequires:	python3-CherryPy
+BuildRequires:	python3-PyJWT
+BuildRequires:	python3-Routes
+BuildRequires:	python3-Werkzeug
+BuildRequires:	python3-numpy-devel
 BuildRequires:  xmlsec1-devel
 %endif
 %endif
@@ -347,8 +344,8 @@ Requires:      grep
 Requires:      logrotate
 Requires:      parted
 Requires:      psmisc
-Requires:      python%{_python_buildid}-requests
-Requires:      python%{_python_buildid}-setuptools
+Requires:      python3-requests
+Requires:      python3-setuptools
 Requires:      util-linux
 Requires:      xfsprogs
 Requires:      which
@@ -373,17 +370,17 @@ Group:		System/Filesystems
 Requires:	librbd1 = %{_epoch_prefix}%{version}-%{release}
 Requires:	librados2 = %{_epoch_prefix}%{version}-%{release}
 Requires:	libcephfs2 = %{_epoch_prefix}%{version}-%{release}
-Requires:	python%{_python_buildid}-rados = %{_epoch_prefix}%{version}-%{release}
-Requires:	python%{_python_buildid}-rbd = %{_epoch_prefix}%{version}-%{release}
-Requires:	python%{_python_buildid}-cephfs = %{_epoch_prefix}%{version}-%{release}
-Requires:	python%{_python_buildid}-rgw = %{_epoch_prefix}%{version}-%{release}
-Requires:	python%{_python_buildid}-ceph-argparse = %{_epoch_prefix}%{version}-%{release}
-Requires:	python%{_python_buildid}-requests
+Requires:	python3-rados = %{_epoch_prefix}%{version}-%{release}
+Requires:	python3-rbd = %{_epoch_prefix}%{version}-%{release}
+Requires:	python3-cephfs = %{_epoch_prefix}%{version}-%{release}
+Requires:	python3-rgw = %{_epoch_prefix}%{version}-%{release}
+Requires:	python3-ceph-argparse = %{_epoch_prefix}%{version}-%{release}
+Requires:	python3-requests
 %if 0%{?fedora} || 0%{?rhel}
-Requires:	python%{_python_buildid}-prettytable
+Requires:	python3-prettytable
 %endif
 %if 0%{?suse_version}
-Requires:	python%{_python_buildid}-PrettyTable
+Requires:	python3-PrettyTable
 %endif
 %if 0%{with libradosstriper}
 Requires:	libradosstriper1 = %{_epoch_prefix}%{version}-%{release}
@@ -426,16 +423,16 @@ Summary:        Ceph Manager Daemon
 Group:          System/Filesystems
 %endif
 Requires:       ceph-base = %{_epoch_prefix}%{version}-%{release}
-Requires:       python%{_python_buildid}-bcrypt
-Requires:       python%{_python_buildid}-pecan
-Requires:       python%{_python_buildid}-six
+Requires:       python3-bcrypt
+Requires:       python3-pecan
+Requires:       python3-six
 %if 0%{?fedora} || 0%{?rhel}
-Requires:       python%{_python_buildid}-cherrypy
-Requires:       python%{_python_buildid}-werkzeug
+Requires:       python3-cherrypy
+Requires:       python3-werkzeug
 %endif
 %if 0%{?suse_version}
-Requires:       python%{_python_buildid}-CherryPy
-Requires:       python%{_python_buildid}-Werkzeug
+Requires:       python3-CherryPy
+Requires:       python3-Werkzeug
 %endif
 %if 0%{?weak_deps}
 Recommends:	ceph-mgr-dashboard = %{_epoch_prefix}%{version}-%{release}
@@ -443,12 +440,12 @@ Recommends:	ceph-mgr-diskprediction-local = %{_epoch_prefix}%{version}-%{release
 Recommends:	ceph-mgr-diskprediction-cloud = %{_epoch_prefix}%{version}-%{release}
 Recommends:	ceph-mgr-rook = %{_epoch_prefix}%{version}-%{release}
 Recommends:	ceph-mgr-ssh = %{_epoch_prefix}%{version}-%{release}
-Recommends:	python%{_python_buildid}-influxdb
+Recommends:	python3-influxdb
 %endif
 %if 0%{?rhel} == 7
 Requires:       pyOpenSSL
 %else
-Requires:       python%{_python_buildid}-pyOpenSSL
+Requires:       python3-pyOpenSSL
 %endif
 %description mgr
 ceph-mgr enables python modules that provide services (such as the REST
@@ -464,21 +461,21 @@ Group:          System/Filesystems
 %endif
 Requires:       ceph-mgr = %{_epoch_prefix}%{version}-%{release}
 %if 0%{?fedora} || 0%{?rhel}
-Requires:       python%{_python_buildid}-cherrypy
-Requires:       python%{_python_buildid}-jwt
-Requires:       python%{_python_buildid}-routes
-Requires:       python%{_python_buildid}-werkzeug
+Requires:       python3-cherrypy
+Requires:       python3-jwt
+Requires:       python3-routes
+Requires:       python3-werkzeug
 %endif
 %if 0%{?suse_version}
-Requires:       python%{_python_buildid}-CherryPy
-Requires:       python%{_python_buildid}-PyJWT
-Requires:       python%{_python_buildid}-Routes
-Requires:       python%{_python_buildid}-Werkzeug
+Requires:       python3-CherryPy
+Requires:       python3-PyJWT
+Requires:       python3-Routes
+Requires:       python3-Werkzeug
 %endif
 %if 0%{?rhel} == 7
 Requires:       pyOpenSSL
 %else
-Requires:       python%{_python_buildid}-pyOpenSSL
+Requires:       python3-pyOpenSSL
 %endif
 %description mgr-dashboard
 ceph-mgr-dashboard is a manager plugin, providing a web-based application
@@ -494,7 +491,7 @@ Group:          System/Filesystems
 %endif
 Requires:       ceph-mgr = %{_epoch_prefix}%{version}-%{release}
 %if 0%{?fedora} || 0%{?rhel} > 7 || 0%{?suse_version}
-Requires:       python%{_python_buildid}-numpy
+Requires:       python3-numpy
 Requires:       python3-scipy
 %endif
 %if 0%{?rhel} == 7
@@ -523,7 +520,7 @@ Summary:        ceph-mgr rook plugin
 Group:          System/Filesystems
 %endif
 Requires:       ceph-mgr = %{_epoch_prefix}%{version}-%{release}
-Requires:       python%{_python_buildid}-kubernetes
+Requires:       python3-kubernetes
 %description mgr-rook
 ceph-mgr-rook is a ceph-mgr plugin for orchestration functions using
 a Rook backend.
@@ -535,7 +532,7 @@ BuildArch:	noarch
 Group:          System/Filesystems
 %endif
 Requires:       ceph-mgr = %{_epoch_prefix}%{version}-%{release}
-Requires:       python%{_python_buildid}-remoto
+Requires:       python3-remoto
 %description mgr-ssh
 ceph-mgr-ssh is a ceph-mgr module for orchestration functions using
 direct SSH connections for management operations.
