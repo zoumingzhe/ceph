@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #include "rgw_sync_module_es.h"
 #include "rgw_sync_module_es_rest.h"
@@ -165,8 +165,8 @@ void RGWMetadataSearchOp::execute()
 
   list<pair<string, string> > conds;
 
-  if (!s->user->system) {
-    conds.push_back(make_pair("permissions", s->user->user_id.to_str()));
+  if (!s->user->get_info().system) {
+    conds.push_back(make_pair("permissions", s->user->get_id().to_str()));
   }
 
   if (!s->bucket_name.empty()) {
@@ -208,7 +208,7 @@ void RGWMetadataSearchOp::execute()
   es_query.set_restricted_fields(&restricted_fields);
 
   map<string, ESEntityTypeMap::EntityType> custom_map;
-  for (auto& i : s->bucket_info.mdsearch_config) {
+  for (auto& i : s->bucket->get_info().mdsearch_config) {
     custom_map[i.first] = (ESEntityTypeMap::EntityType)i.second;
   }
 
@@ -379,7 +379,7 @@ class RGWHandler_REST_MDSearch_S3 : public RGWHandler_REST_S3 {
 protected:
   RGWOp *op_get() override {
     if (s->info.args.exists("query")) {
-      return new RGWMetadataSearch_ObjStore_S3(store->get_sync_module());
+      return new RGWMetadataSearch_ObjStore_S3(store->getRados()->get_sync_module());
     }
     if (!s->init_state.url_bucket.empty() &&
         s->info.args.exists("mdsearch")) {
@@ -399,18 +399,19 @@ public:
 };
 
 
-RGWHandler_REST* RGWRESTMgr_MDSearch_S3::get_handler(struct req_state* const s,
+RGWHandler_REST* RGWRESTMgr_MDSearch_S3::get_handler(rgw::sal::RGWRadosStore *store,
+						     struct req_state* const s,
                                                      const rgw::auth::StrategyRegistry& auth_registry,
                                                      const std::string& frontend_prefix)
 {
   int ret =
-    RGWHandler_REST_S3::init_from_header(s,
+    RGWHandler_REST_S3::init_from_header(store, s,
 					RGW_FORMAT_XML, true);
   if (ret < 0) {
     return nullptr;
   }
 
-  if (!s->object.empty()) {
+  if (!s->object->empty()) {
     return nullptr;
   }
 

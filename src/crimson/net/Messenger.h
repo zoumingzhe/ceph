@@ -17,28 +17,33 @@
 #include <seastar/core/future.hh>
 
 #include "Fwd.h"
-#include "crimson/thread/Throttle.h"
+#include "crimson/common/throttle.h"
+#include "crimson/net/chained_dispatchers.h"
+#include "msg/Message.h"
 #include "msg/Policy.h"
 
 class AuthAuthorizer;
 
-namespace ceph::auth {
+namespace crimson::auth {
 class AuthClient;
 class AuthServer;
 }
 
-namespace ceph::net {
+namespace crimson::net {
 
-using Throttle = ceph::thread::Throttle;
+#ifdef UNIT_TESTS_BUILT
+class Interceptor;
+#endif
+
+using Throttle = crimson::common::Throttle;
 using SocketPolicy = ceph::net::Policy<Throttle>;
 
 class Messenger {
   entity_name_t my_name;
   entity_addrvec_t my_addrs;
-  uint32_t global_seq = 0;
   uint32_t crc_flags = 0;
-  ceph::auth::AuthClient* auth_client = nullptr;
-  ceph::auth::AuthServer* auth_server = nullptr;
+  crimson::auth::AuthClient* auth_client = nullptr;
+  crimson::auth::AuthServer* auth_server = nullptr;
   bool require_authorizer = true;
 
 public:
@@ -47,7 +52,11 @@ public:
   {}
   virtual ~Messenger() {}
 
-  int get_mytype() const { return my_name.type(); }
+#ifdef UNIT_TESTS_BUILT
+  Interceptor *interceptor = nullptr;
+#endif
+
+  entity_type_t get_mytype() const { return my_name.type(); }
   const entity_name_t& get_myname() const { return my_name; }
   const entity_addrvec_t& get_myaddrs() const { return my_addrs; }
   entity_addr_t get_myaddr() const { return my_addrs.front(); }
@@ -64,27 +73,31 @@ public:
                                      uint32_t min_port, uint32_t max_port) = 0;
 
   /// start the messenger
-  virtual seastar::future<> start(Dispatcher *dispatcher) = 0;
+  virtual seastar::future<> start(ChainedDispatchersRef) = 0;
 
   /// either return an existing connection to the peer,
   /// or a new pending connection
-  virtual seastar::future<ConnectionXRef>
+  virtual ConnectionRef
   connect(const entity_addr_t& peer_addr,
-          const entity_type_t& peer_type) = 0;
+          const entity_name_t& peer_name) = 0;
+
+  ConnectionRef
+  connect(const entity_addr_t& peer_addr,
+          const entity_type_t& peer_type) {
+    return connect(peer_addr, entity_name_t(peer_type, -1));
+  }
 
   // wait for messenger shutdown
   virtual seastar::future<> wait() = 0;
 
+  virtual void add_dispatcher(Dispatcher&) = 0;
+
+  virtual void remove_dispatcher(Dispatcher&) = 0;
+
+  virtual bool dispatcher_chain_empty() const = 0;
   /// stop listenening and wait for all connections to close. safe to destruct
   /// after this future becomes available
   virtual seastar::future<> shutdown() = 0;
-
-  uint32_t get_global_seq(uint32_t old=0) {
-    if (old > global_seq) {
-      global_seq = old;
-    }
-    return ++global_seq;
-  }
 
   uint32_t get_crc_flags() const {
     return crc_flags;
@@ -96,18 +109,13 @@ public:
     crc_flags |= MSG_CRC_HEADER;
   }
 
-  ceph::auth::AuthClient* get_auth_client() const { return auth_client; }
-  void set_auth_client(ceph::auth::AuthClient *ac) {
+  crimson::auth::AuthClient* get_auth_client() const { return auth_client; }
+  void set_auth_client(crimson::auth::AuthClient *ac) {
     auth_client = ac;
   }
-  ceph::auth::AuthServer* get_auth_server() const { return auth_server; }
-  void set_auth_server(ceph::auth::AuthServer *as) {
+  crimson::auth::AuthServer* get_auth_server() const { return auth_server; }
+  void set_auth_server(crimson::auth::AuthServer *as) {
     auth_server = as;
-  }
-
-  // get the local messenger shard if it is accessed by another core
-  virtual Messenger* get_local_shard() {
-    return this;
   }
 
   virtual void print(ostream& out) const = 0;
@@ -130,11 +138,10 @@ public:
   void set_require_authorizer(bool r) {
     require_authorizer = r;
   }
-  static seastar::future<Messenger*>
+  static MessengerRef
   create(const entity_name_t& name,
          const std::string& lname,
-         const uint64_t nonce,
-         const int master_sid=-1);
+         const uint64_t nonce);
 };
 
 inline ostream& operator<<(ostream& out, const Messenger& msgr) {
@@ -144,4 +151,4 @@ inline ostream& operator<<(ostream& out, const Messenger& msgr) {
   return out;
 }
 
-} // namespace ceph::net
+} // namespace crimson::net

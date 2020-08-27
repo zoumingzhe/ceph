@@ -1,7 +1,7 @@
 import { Component, Input, OnInit } from '@angular/core';
 import { FormControl, NgForm } from '@angular/forms';
 
-import * as _ from 'lodash';
+import _ from 'lodash';
 
 import { Icons } from '../../../shared/enum/icons.enum';
 import { ConfigurationService } from '../../api/configuration.service';
@@ -58,7 +58,7 @@ export class ConfigOptionComponent implements OnInit {
 
   private loadStoredData() {
     this.configService.filter(this.optionNames).subscribe((data: any) => {
-      this.options = data.map((configOption) => {
+      this.options = data.map((configOption: any) => {
         const formControl = this.optionsForm.get(configOption.name);
         const typeValidators = ConfigOptionTypes.getTypeValidators(configOption);
         configOption.additionalTypeInfo = ConfigOptionTypes.getType(configOption.type);

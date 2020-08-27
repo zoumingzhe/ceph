@@ -62,6 +62,7 @@
 #include "messages/MOSDPGTemp.h"
 #include "messages/MOSDFailure.h"
 #include "messages/MOSDMarkMeDown.h"
+#include "messages/MOSDMarkMeDead.h"
 #include "messages/MOSDFull.h"
 #include "messages/MOSDPing.h"
 #include "messages/MOSDOp.h"
@@ -75,13 +76,18 @@
 
 #include "messages/MOSDPGCreated.h"
 #include "messages/MOSDPGNotify.h"
+#include "messages/MOSDPGNotify2.h"
 #include "messages/MOSDPGQuery.h"
+#include "messages/MOSDPGQuery2.h"
 #include "messages/MOSDPGLog.h"
 #include "messages/MOSDPGRemove.h"
 #include "messages/MOSDPGInfo.h"
+#include "messages/MOSDPGInfo2.h"
 #include "messages/MOSDPGCreate.h"
 #include "messages/MOSDPGCreate2.h"
 #include "messages/MOSDPGTrim.h"
+#include "messages/MOSDPGLease.h"
+#include "messages/MOSDPGLeaseAck.h"
 #include "messages/MOSDScrub.h"
 #include "messages/MOSDScrub2.h"
 #include "messages/MOSDScrubReserve.h"
@@ -122,8 +128,9 @@
 #include "messages/MClientLease.h"
 #include "messages/MClientSnap.h"
 #include "messages/MClientQuota.h"
+#include "messages/MClientMetrics.h"
 
-#include "messages/MMDSSlaveRequest.h"
+#include "messages/MMDSPeerRequest.h"
 
 #include "messages/MMDSMap.h"
 #include "messages/MFSMap.h"
@@ -168,6 +175,8 @@
 #include "messages/MHeartbeat.h"
 
 #include "messages/MMDSTableRequest.h"
+#include "messages/MMDSMetrics.h"
+#include "messages/MMDSPing.h"
 
 //#include "messages/MInodeUpdate.h"
 #include "messages/MCacheExpire.h"
@@ -181,6 +190,8 @@
 #include "messages/MMgrClose.h"
 #include "messages/MMgrConfigure.h"
 #include "messages/MMonMgrReport.h"
+#include "messages/MMgrCommand.h"
+#include "messages/MMgrCommandReply.h"
 #include "messages/MServiceMap.h"
 
 #include "messages/MLock.h"
@@ -202,6 +213,10 @@
 
 #include "messages/MOSDPGUpdateLogMissing.h"
 #include "messages/MOSDPGUpdateLogMissingReply.h"
+
+#ifdef WITH_BLKIN
+#include "Messenger.h"
+#endif
 
 #define DEBUGLVL  10    // debug level of output
 
@@ -280,18 +295,21 @@ void Message::encode(uint64_t features, int crcflags, bool skip_header_crc)
   }
 }
 
-void Message::dump(Formatter *f) const
+void Message::dump(ceph::Formatter *f) const
 {
-  stringstream ss;
+  std::stringstream ss;
   print(ss);
   f->dump_string("summary", ss.str());
 }
 
-Message *decode_message(CephContext *cct, int crcflags,
-			ceph_msg_header& header,
-			ceph_msg_footer& footer,
-			bufferlist& front, bufferlist& middle,
-			bufferlist& data, Connection* conn)
+Message *decode_message(CephContext *cct,
+                        int crcflags,
+                        ceph_msg_header& header,
+                        ceph_msg_footer& footer,
+                        ceph::bufferlist& front,
+                        ceph::bufferlist& middle,
+                        ceph::bufferlist& data,
+                        Message::ConnectionRef conn)
 {
   // verify crc
   if (crcflags & MSG_CRC_HEADER) {
@@ -336,11 +354,13 @@ Message *decode_message(CephContext *cct, int crcflags,
   }
 
   // make message
-  ref_t<Message> m;
+  ceph::ref_t<Message> m;
   int type = header.type;
   switch (type) {
 
     // -- with payload --
+
+    using ceph::make_message;
 
   case MSG_PGSTATS:
     m = make_message<MPGStats>();
@@ -475,6 +495,9 @@ Message *decode_message(CephContext *cct, int crcflags,
   case MSG_OSD_MARK_ME_DOWN:
     m = make_message<MOSDMarkMeDown>();
     break;
+  case MSG_OSD_MARK_ME_DEAD:
+    m = make_message<MOSDMarkMeDead>();
+    break;
   case MSG_OSD_FULL:
     m = make_message<MOSDFull>();
     break;
@@ -517,8 +540,14 @@ Message *decode_message(CephContext *cct, int crcflags,
   case MSG_OSD_PG_NOTIFY:
     m = make_message<MOSDPGNotify>();
     break;
+  case MSG_OSD_PG_NOTIFY2:
+    m = make_message<MOSDPGNotify2>();
+    break;
   case MSG_OSD_PG_QUERY:
     m = make_message<MOSDPGQuery>();
+    break;
+  case MSG_OSD_PG_QUERY2:
+    m = make_message<MOSDPGQuery2>();
     break;
   case MSG_OSD_PG_LOG:
     m = make_message<MOSDPGLog>();
@@ -529,6 +558,9 @@ Message *decode_message(CephContext *cct, int crcflags,
   case MSG_OSD_PG_INFO:
     m = make_message<MOSDPGInfo>();
     break;
+  case MSG_OSD_PG_INFO2:
+    m = make_message<MOSDPGInfo2>();
+    break;
   case MSG_OSD_PG_CREATE:
     m = make_message<MOSDPGCreate>();
     break;
@@ -537,6 +569,12 @@ Message *decode_message(CephContext *cct, int crcflags,
     break;
   case MSG_OSD_PG_TRIM:
     m = make_message<MOSDPGTrim>();
+    break;
+  case MSG_OSD_PG_LEASE:
+    m = make_message<MOSDPGLease>();
+    break;
+  case MSG_OSD_PG_LEASE_ACK:
+    m = make_message<MOSDPGLeaseAck>();
     break;
 
   case MSG_OSD_SCRUB:
@@ -651,10 +689,13 @@ Message *decode_message(CephContext *cct, int crcflags,
   case CEPH_MSG_CLIENT_QUOTA:
     m = make_message<MClientQuota>();
     break;
+  case CEPH_MSG_CLIENT_METRICS:
+    m = make_message<MClientMetrics>();
+    break;
 
     // mds
-  case MSG_MDS_SLAVE_REQUEST:
-    m = make_message<MMDSSlaveRequest>();
+  case MSG_MDS_PEER_REQUEST:
+    m = make_message<MMDSPeerRequest>();
     break;
 
   case CEPH_MSG_MDS_MAP:
@@ -798,6 +839,14 @@ Message *decode_message(CephContext *cct, int crcflags,
     m = make_message<MLock>();
     break;
 
+  case MSG_MDS_METRICS:
+    m = make_message<MMDSMetrics>();
+    break;
+
+  case MSG_MDS_PING:
+    m = make_message<MMDSPing>();
+    break;
+
   case MSG_MGR_BEACON:
     m = make_message<MMgrBeacon>();
     break;
@@ -816,6 +865,14 @@ Message *decode_message(CephContext *cct, int crcflags,
 
   case MSG_MGR_DIGEST:
     m = make_message<MMgrDigest>();
+    break;
+
+  case MSG_MGR_COMMAND:
+    m = make_message<MMgrCommand>();
+    break;
+
+  case MSG_MGR_COMMAND_REPLY:
+    m = make_message<MMgrCommandReply>();
     break;
 
   case MSG_MGR_OPEN:
@@ -882,7 +939,7 @@ Message *decode_message(CephContext *cct, int crcflags,
     return 0;
   }
 
-  m->set_connection(conn);
+  m->set_connection(std::move(conn));
   m->set_header(header);
   m->set_footer(footer);
   m->set_payload(front);
@@ -892,7 +949,7 @@ Message *decode_message(CephContext *cct, int crcflags,
   try {
     m->decode_payload();
   }
-  catch (const buffer::error &e) {
+  catch (const ceph::buffer::error &e) {
     if (cct) {
       lderr(cct) << "failed to decode message of type " << type
 		 << " v" << header.version
@@ -911,7 +968,7 @@ Message *decode_message(CephContext *cct, int crcflags,
   return m.detach();
 }
 
-void Message::encode_trace(bufferlist &bl, uint64_t features) const
+void Message::encode_trace(ceph::bufferlist &bl, uint64_t features) const
 {
   using ceph::encode;
   auto p = trace.get_info();
@@ -922,7 +979,7 @@ void Message::encode_trace(bufferlist &bl, uint64_t features) const
   encode(*p, bl);
 }
 
-void Message::decode_trace(bufferlist::const_iterator &p, bool create)
+void Message::decode_trace(ceph::bufferlist::const_iterator &p, bool create)
 {
   blkin_trace_info info = {};
   decode(info, p);
@@ -934,12 +991,12 @@ void Message::decode_trace(bufferlist::const_iterator &p, bool create)
   const auto msgr = connection->get_messenger();
   const auto endpoint = msgr->get_trace_endpoint();
   if (info.trace_id) {
-    trace.init(get_type_name(), endpoint, &info, true);
+    trace.init(get_type_name().data(), endpoint, &info, true);
     trace.event("decoded trace");
   } else if (create || (msgr->get_myname().is_osd() &&
                         msgr->cct->_conf->osd_blkin_trace_all)) {
     // create a trace even if we didn't get one on the wire
-    trace.init(get_type_name(), endpoint);
+    trace.init(get_type_name().data(), endpoint);
     trace.event("created trace");
   }
   trace.keyval("tid", get_tid());
@@ -955,23 +1012,21 @@ void Message::decode_trace(bufferlist::const_iterator &p, bool create)
 // problems, we currently always encode and decode using the old footer format that doesn't
 // allow for message authentication.  Eventually we should fix that.  PLR
 
-void encode_message(Message *msg, uint64_t features, bufferlist& payload)
+void encode_message(Message *msg, uint64_t features, ceph::bufferlist& payload)
 {
-  bufferlist front, middle, data;
   ceph_msg_footer_old old_footer;
-  ceph_msg_footer footer;
   msg->encode(features, MSG_CRC_ALL);
   encode(msg->get_header(), payload);
 
   // Here's where we switch to the old footer format.  PLR
-
-  footer = msg->get_footer();
+  ceph_msg_footer footer = msg->get_footer();
   old_footer.front_crc = footer.front_crc;   
   old_footer.middle_crc = footer.middle_crc;   
   old_footer.data_crc = footer.data_crc;   
   old_footer.flags = footer.flags;   
   encode(old_footer, payload);
 
+  using ceph::encode;
   encode(msg->get_payload(), payload);
   encode(msg->get_middle(), payload);
   encode(msg->get_data(), payload);
@@ -982,12 +1037,12 @@ void encode_message(Message *msg, uint64_t features, bufferlist& payload)
 // We've slipped in a 0 signature at this point, so any signature checking after this will
 // fail.  PLR
 
-Message *decode_message(CephContext *cct, int crcflags, bufferlist::const_iterator& p)
+Message *decode_message(CephContext *cct, int crcflags, ceph::bufferlist::const_iterator& p)
 {
   ceph_msg_header h;
   ceph_msg_footer_old fo;
   ceph_msg_footer f;
-  bufferlist fr, mi, da;
+  ceph::bufferlist fr, mi, da;
   decode(h, p);
   decode(fo, p);
   f.front_crc = fo.front_crc;
@@ -995,6 +1050,7 @@ Message *decode_message(CephContext *cct, int crcflags, bufferlist::const_iterat
   f.data_crc = fo.data_crc;
   f.flags = fo.flags;
   f.sig = 0;
+  using ceph::decode;
   decode(fr, p);
   decode(mi, p);
   decode(da, p);

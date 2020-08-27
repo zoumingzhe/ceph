@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -24,13 +24,16 @@
 #include "rgw_trim_bilog.h"
 #include "rgw_cr_rados.h"
 #include "rgw_cr_rest.h"
+#include "rgw_cr_tools.h"
 #include "rgw_data_sync.h"
 #include "rgw_metadata.h"
-#include "rgw_rados.h"
+#include "rgw_sal.h"
 #include "rgw_zone.h"
 #include "rgw_sync.h"
+#include "rgw_bucket.h"
 
 #include "services/svc_zone.h"
+#include "services/svc_meta.h"
 
 #include <boost/asio/yield.hpp>
 #include "include/ceph_assert.h"
@@ -235,7 +238,7 @@ void TrimComplete::Handler::handle(bufferlist::const_iterator& input,
 
 /// rados watcher for bucket trim notifications
 class BucketTrimWatcher : public librados::WatchCtx2 {
-  RGWRados *const store;
+  rgw::sal::RGWRadosStore *const store;
   const rgw_raw_obj& obj;
   rgw_rados_ref ref;
   uint64_t handle{0};
@@ -244,7 +247,7 @@ class BucketTrimWatcher : public librados::WatchCtx2 {
   boost::container::flat_map<TrimNotifyType, HandlerPtr> handlers;
 
  public:
-  BucketTrimWatcher(RGWRados *store, const rgw_raw_obj& obj,
+  BucketTrimWatcher(rgw::sal::RGWRadosStore *store, const rgw_raw_obj& obj,
                     TrimCounters::Server *counters)
     : store(store), obj(obj) {
     handlers.emplace(NotifyTrimCounters, new TrimCounters::Handler(counters));
@@ -256,24 +259,24 @@ class BucketTrimWatcher : public librados::WatchCtx2 {
   }
 
   int start() {
-    int r = store->get_raw_obj_ref(obj, &ref);
+    int r = store->getRados()->get_raw_obj_ref(obj, &ref);
     if (r < 0) {
       return r;
     }
 
     // register a watch on the realm's control object
-    r = ref.ioctx.watch2(ref.obj.oid, &handle, this);
+    r = ref.pool.ioctx().watch2(ref.obj.oid, &handle, this);
     if (r == -ENOENT) {
       constexpr bool exclusive = true;
-      r = ref.ioctx.create(ref.obj.oid, exclusive);
+      r = ref.pool.ioctx().create(ref.obj.oid, exclusive);
       if (r == -EEXIST || r == 0) {
-        r = ref.ioctx.watch2(ref.obj.oid, &handle, this);
+        r = ref.pool.ioctx().watch2(ref.obj.oid, &handle, this);
       }
     }
     if (r < 0) {
       lderr(store->ctx()) << "Failed to watch " << ref.obj
           << " with " << cpp_strerror(-r) << dendl;
-      ref.ioctx.close();
+      ref.pool.ioctx().close();
       return r;
     }
 
@@ -282,24 +285,24 @@ class BucketTrimWatcher : public librados::WatchCtx2 {
   }
 
   int restart() {
-    int r = ref.ioctx.unwatch2(handle);
+    int r = ref.pool.ioctx().unwatch2(handle);
     if (r < 0) {
       lderr(store->ctx()) << "Failed to unwatch on " << ref.obj
           << " with " << cpp_strerror(-r) << dendl;
     }
-    r = ref.ioctx.watch2(ref.obj.oid, &handle, this);
+    r = ref.pool.ioctx().watch2(ref.obj.oid, &handle, this);
     if (r < 0) {
       lderr(store->ctx()) << "Failed to restart watch on " << ref.obj
           << " with " << cpp_strerror(-r) << dendl;
-      ref.ioctx.close();
+      ref.pool.ioctx().close();
     }
     return r;
   }
 
   void stop() {
     if (handle) {
-      ref.ioctx.unwatch2(handle);
-      ref.ioctx.close();
+      ref.pool.ioctx().unwatch2(handle);
+      ref.pool.ioctx().close();
     }
   }
 
@@ -324,7 +327,7 @@ class BucketTrimWatcher : public librados::WatchCtx2 {
     } catch (const buffer::error& e) {
       lderr(store->ctx()) << "Failed to decode notification: " << e.what() << dendl;
     }
-    ref.ioctx.notify_ack(ref.obj.oid, notify_id, cookie, reply);
+    ref.pool.ioctx().notify_ack(ref.obj.oid, notify_id, cookie, reply);
   }
 
   /// reestablish the watch if it gets disconnected
@@ -345,7 +348,7 @@ struct BucketTrimObserver {
   virtual ~BucketTrimObserver() = default;
 
   virtual void on_bucket_trimmed(std::string&& bucket_instance) = 0;
-  virtual bool trimmed_recently(const boost::string_view& bucket_instance) = 0;
+  virtual bool trimmed_recently(const std::string_view& bucket_instance) = 0;
 };
 
 /// populate the status with the minimum stable marker of each shard
@@ -361,8 +364,8 @@ int take_min_status(CephContext *cct, Iter first, Iter last,
     auto m = status->begin();
     for (auto& shard : *peer) {
       auto& marker = *m++;
-      // only consider incremental sync markers
-      if (shard.state != rgw_bucket_shard_sync_info::StateIncrementalSync) {
+      // if no sync has started, we can safely trim everything
+      if (shard.state == rgw_bucket_shard_sync_info::StateInit) {
         continue;
       }
       // always take the first marker, or any later marker that's smaller
@@ -378,12 +381,12 @@ int take_min_status(CephContext *cct, Iter first, Iter last,
 /// concurrent requests
 class BucketTrimShardCollectCR : public RGWShardCollectCR {
   static constexpr int MAX_CONCURRENT_SHARDS = 16;
-  RGWRados *const store;
+  rgw::sal::RGWRadosStore *const store;
   const RGWBucketInfo& bucket_info;
   const std::vector<std::string>& markers; //< shard markers to trim
   size_t i{0}; //< index of current shard marker
  public:
-  BucketTrimShardCollectCR(RGWRados *store, const RGWBucketInfo& bucket_info,
+  BucketTrimShardCollectCR(rgw::sal::RGWRadosStore *store, const RGWBucketInfo& bucket_info,
                            const std::vector<std::string>& markers)
     : RGWShardCollectCR(store->ctx(), MAX_CONCURRENT_SHARDS),
       store(store), bucket_info(bucket_info), markers(markers)
@@ -412,12 +415,16 @@ bool BucketTrimShardCollectCR::spawn_next()
 
 /// trim the bilog of all of the given bucket instance's shards
 class BucketTrimInstanceCR : public RGWCoroutine {
-  RGWRados *const store;
+  rgw::sal::RGWRadosStore *const store;
   RGWHTTPManager *const http;
   BucketTrimObserver *const observer;
   std::string bucket_instance;
+  rgw_bucket_get_sync_policy_params get_policy_params;
+  std::shared_ptr<rgw_bucket_get_sync_policy_result> source_policy;
+  rgw_bucket bucket;
   const std::string& zone_id; //< my zone id
-  RGWBucketInfo bucket_info; //< bucket instance info to locate bucket indices
+  RGWBucketInfo _bucket_info; 
+  const RGWBucketInfo *pbucket_info; //< pointer to bucket instance info to locate bucket indices
   int child_ret = 0;
 
   using StatusShards = std::vector<rgw_bucket_shard_sync_info>;
@@ -425,15 +432,16 @@ class BucketTrimInstanceCR : public RGWCoroutine {
   std::vector<std::string> min_markers; //< min marker per shard
 
  public:
-  BucketTrimInstanceCR(RGWRados *store, RGWHTTPManager *http,
+  BucketTrimInstanceCR(rgw::sal::RGWRadosStore *store, RGWHTTPManager *http,
                        BucketTrimObserver *observer,
                        const std::string& bucket_instance)
     : RGWCoroutine(store->ctx()), store(store),
       http(http), observer(observer),
       bucket_instance(bucket_instance),
-      zone_id(store->svc.zone->get_zone().id),
-      peer_status(store->svc.zone->get_zone_data_notify_to_map().size())
-  {}
+      zone_id(store->svc()->zone->get_zone().id) {
+    rgw_bucket_parse_bucket_key(cct, bucket_instance, &bucket, nullptr);
+    source_policy = make_shared<rgw_bucket_get_sync_policy_result>();
+  }
 
   int operate() override;
 };
@@ -443,29 +451,71 @@ int BucketTrimInstanceCR::operate()
   reenter(this) {
     ldout(cct, 4) << "starting trim on bucket=" << bucket_instance << dendl;
 
+    get_policy_params.zone = zone_id;
+    get_policy_params.bucket = bucket;
+    yield call(new RGWBucketGetSyncPolicyHandlerCR(store->svc()->rados->get_async_processor(),
+                                                   store,
+                                                   get_policy_params,
+                                                   source_policy));
+    if (retcode < 0) {
+      if (retcode != -ENOENT) {
+        ldout(cct, 0) << "ERROR: failed to fetch policy handler for bucket=" << bucket << dendl;
+      }
+
+      return set_cr_error(retcode);
+    }
+
+    if (auto& opt_bucket_info = source_policy->policy_handler->get_bucket_info();
+        opt_bucket_info) {
+      pbucket_info = &(*opt_bucket_info);
+    } else {
+      /* this shouldn't really happen */
+      return set_cr_error(-ENOENT);
+    }
+
     // query peers for sync status
-    set_status("fetching sync status from peers");
+    set_status("fetching sync status from relevant peers");
     yield {
-      // query data sync status from each sync peer
-      rgw_http_param_pair params[] = {
-        { "type", "bucket-index" },
-        { "status", nullptr },
-        { "bucket", bucket_instance.c_str() },
-        { "source-zone", zone_id.c_str() },
-        { nullptr, nullptr }
-      };
+      const auto& all_dests = source_policy->policy_handler->get_all_dests();
+
+      vector<rgw_zone_id> zids;
+      rgw_zone_id last_zid;
+      for (auto& diter : all_dests) {
+        const auto& zid = diter.first;
+        if (zid == last_zid) {
+          continue;
+        }
+        last_zid = zid;
+        zids.push_back(zid);
+      }
+
+      peer_status.resize(zids.size());
+
+      auto& zone_conn_map = store->svc()->zone->get_zone_conn_map();
 
       auto p = peer_status.begin();
-      for (auto& c : store->svc.zone->get_zone_data_notify_to_map()) {
+      for (auto& zid : zids) {
+        // query data sync status from each sync peer
+        rgw_http_param_pair params[] = {
+          { "type", "bucket-index" },
+          { "status", nullptr },
+          { "options", "merge" },
+          { "bucket", bucket_instance.c_str() }, /* equal to source-bucket when `options==merge` and source-bucket
+                                                    param is not provided */
+          { "source-zone", zone_id.c_str() },
+          { nullptr, nullptr }
+        };
+
+        auto ziter = zone_conn_map.find(zid);
+        if (ziter == zone_conn_map.end()) {
+          ldout(cct, 0) << "WARNING: no connection to zone " << zid << ", can't trim bucket: " << bucket << dendl;
+          return set_cr_error(-ECANCELED);
+        }
         using StatusCR = RGWReadRESTResourceCR<StatusShards>;
-        spawn(new StatusCR(cct, c.second, http, "/admin/log/", params, &*p),
+        spawn(new StatusCR(cct, ziter->second, http, "/admin/log/", params, &*p),
               false);
         ++p;
       }
-      // in parallel, read the local bucket instance info
-      spawn(new RGWGetBucketInstanceInfoCR(store->get_async_rados(), store,
-                                           bucket_instance, &bucket_info),
-            false);
     }
     // wait for a response from each peer. all must respond to attempt trim
     while (num_spawned()) {
@@ -479,7 +529,7 @@ int BucketTrimInstanceCR::operate()
 
     // initialize each shard with the maximum marker, which is only used when
     // there are no peers syncing from us
-    min_markers.assign(std::max(1u, bucket_info.num_shards),
+    min_markers.assign(std::max(1u, pbucket_info->layout.current_index.layout.normal.num_shards),
                        RGWSyncLogTrimCR::max_marker);
 
     // determine the minimum marker for each shard
@@ -491,10 +541,10 @@ int BucketTrimInstanceCR::operate()
     }
 
     // trim shards with a ShardCollectCR
-    ldout(cct, 10) << "trimming bilogs for bucket=" << bucket_info.bucket
+    ldout(cct, 10) << "trimming bilogs for bucket=" << pbucket_info->bucket
        << " markers=" << min_markers << ", shards=" << min_markers.size() << dendl;
     set_status("trimming bilog shards");
-    yield call(new BucketTrimShardCollectCR(store, bucket_info, min_markers));
+    yield call(new BucketTrimShardCollectCR(store, *pbucket_info, min_markers));
     // ENODATA just means there were no keys to trim
     if (retcode == -ENODATA) {
       retcode = 0;
@@ -513,13 +563,13 @@ int BucketTrimInstanceCR::operate()
 
 /// trim each bucket instance while limiting the number of concurrent operations
 class BucketTrimInstanceCollectCR : public RGWShardCollectCR {
-  RGWRados *const store;
+  rgw::sal::RGWRadosStore *const store;
   RGWHTTPManager *const http;
   BucketTrimObserver *const observer;
   std::vector<std::string>::const_iterator bucket;
   std::vector<std::string>::const_iterator end;
  public:
-  BucketTrimInstanceCollectCR(RGWRados *store, RGWHTTPManager *http,
+  BucketTrimInstanceCollectCR(rgw::sal::RGWRadosStore *store, RGWHTTPManager *http,
                               BucketTrimObserver *observer,
                               const std::vector<std::string>& buckets,
                               int max_concurrent)
@@ -714,7 +764,7 @@ class MetadataListCR : public RGWSimpleCoroutine {
 };
 
 class BucketTrimCR : public RGWCoroutine {
-  RGWRados *const store;
+  rgw::sal::RGWRadosStore *const store;
   RGWHTTPManager *const http;
   const BucketTrimConfig& config;
   BucketTrimObserver *const observer;
@@ -729,7 +779,7 @@ class BucketTrimCR : public RGWCoroutine {
 
   static const std::string section; //< metadata section for bucket instances
  public:
-  BucketTrimCR(RGWRados *store, RGWHTTPManager *http,
+  BucketTrimCR(rgw::sal::RGWRadosStore *store, RGWHTTPManager *http,
                const BucketTrimConfig& config, BucketTrimObserver *observer,
                const rgw_raw_obj& obj)
     : RGWCoroutine(store->ctx()), store(store), http(http), config(config),
@@ -785,7 +835,7 @@ int BucketTrimCR::operate()
       // read BucketTrimStatus for marker position
       set_status("reading trim status");
       using ReadStatus = RGWSimpleRadosReadCR<BucketTrimStatus>;
-      yield call(new ReadStatus(store->get_async_rados(), store->svc.sysobj, obj,
+      yield call(new ReadStatus(store->svc()->rados->get_async_processor(), store->svc()->sysobj, obj,
                                 &status, true, &objv));
       if (retcode < 0) {
         ldout(cct, 10) << "failed to read bilog trim status: "
@@ -820,7 +870,8 @@ int BucketTrimCR::operate()
           return buckets.size() < config.buckets_per_interval;
         };
 
-        call(new MetadataListCR(cct, store->get_async_rados(), store->meta_mgr,
+        call(new MetadataListCR(cct, store->svc()->rados->get_async_processor(),
+                                store->ctl()->meta.mgr,
                                 section, status.marker, cb));
       }
       if (retcode < 0) {
@@ -843,7 +894,7 @@ int BucketTrimCR::operate()
       status.marker = std::move(last_cold_marker);
       ldout(cct, 20) << "writing bucket trim marker=" << status.marker << dendl;
       using WriteStatus = RGWSimpleRadosWriteCR<BucketTrimStatus>;
-      yield call(new WriteStatus(store->get_async_rados(), store->svc.sysobj, obj,
+      yield call(new WriteStatus(store->svc()->rados->get_async_processor(), store->svc()->sysobj, obj,
                                  status, &objv));
       if (retcode < 0) {
         ldout(cct, 4) << "failed to write updated trim status: "
@@ -876,7 +927,7 @@ int BucketTrimCR::operate()
 }
 
 class BucketTrimPollCR : public RGWCoroutine {
-  RGWRados *const store;
+  rgw::sal::RGWRadosStore *const store;
   RGWHTTPManager *const http;
   const BucketTrimConfig& config;
   BucketTrimObserver *const observer;
@@ -885,7 +936,7 @@ class BucketTrimPollCR : public RGWCoroutine {
   const std::string cookie;
 
  public:
-  BucketTrimPollCR(RGWRados *store, RGWHTTPManager *http,
+  BucketTrimPollCR(rgw::sal::RGWRadosStore *store, RGWHTTPManager *http,
                    const BucketTrimConfig& config,
                    BucketTrimObserver *observer, const rgw_raw_obj& obj)
     : RGWCoroutine(store->ctx()), store(store), http(http),
@@ -905,7 +956,7 @@ int BucketTrimPollCR::operate()
 
       // prevent others from trimming for our entire wait interval
       set_status("acquiring trim lock");
-      yield call(new RGWSimpleRadosLockCR(store->get_async_rados(), store,
+      yield call(new RGWSimpleRadosLockCR(store->svc()->rados->get_async_processor(), store,
                                           obj, name, cookie,
                                           config.trim_interval_sec));
       if (retcode < 0) {
@@ -918,7 +969,7 @@ int BucketTrimPollCR::operate()
       if (retcode < 0) {
         // on errors, unlock so other gateways can try
         set_status("unlocking");
-        yield call(new RGWSimpleRadosUnlockCR(store->get_async_rados(), store,
+        yield call(new RGWSimpleRadosUnlockCR(store->svc()->rados->get_async_processor(), store,
                                               obj, name, cookie));
       }
     }
@@ -999,7 +1050,7 @@ void configure_bucket_trim(CephContext *cct, BucketTrimConfig& config)
 class BucketTrimManager::Impl : public TrimCounters::Server,
                                 public BucketTrimObserver {
  public:
-  RGWRados *const store;
+   rgw::sal::RGWRadosStore *const store;
   const BucketTrimConfig config;
 
   const rgw_raw_obj status_obj;
@@ -1018,9 +1069,9 @@ class BucketTrimManager::Impl : public TrimCounters::Server,
   /// protect data shared between data sync, trim, and watch/notify threads
   std::mutex mutex;
 
-  Impl(RGWRados *store, const BucketTrimConfig& config)
+  Impl(rgw::sal::RGWRadosStore *store, const BucketTrimConfig& config)
     : store(store), config(config),
-      status_obj(store->svc.zone->get_zone_params().log_pool, BucketTrimStatus::oid),
+      status_obj(store->svc()->zone->get_zone_params().log_pool, BucketTrimStatus::oid),
       counter(config.counter_size),
       trimmed(config.recent_size, config.recent_duration),
       watcher(store, status_obj, this)
@@ -1050,13 +1101,13 @@ class BucketTrimManager::Impl : public TrimCounters::Server,
     trimmed.insert(std::move(bucket_instance), clock_type::now());
   }
 
-  bool trimmed_recently(const boost::string_view& bucket_instance) override {
+  bool trimmed_recently(const std::string_view& bucket_instance) override {
     std::lock_guard<std::mutex> lock(mutex);
     return trimmed.lookup(bucket_instance);
   }
 };
 
-BucketTrimManager::BucketTrimManager(RGWRados *store,
+BucketTrimManager::BucketTrimManager(rgw::sal::RGWRadosStore *store,
                                      const BucketTrimConfig& config)
   : impl(new Impl(store, config))
 {
@@ -1068,14 +1119,14 @@ int BucketTrimManager::init()
   return impl->watcher.start();
 }
 
-void BucketTrimManager::on_bucket_changed(const boost::string_view& bucket)
+void BucketTrimManager::on_bucket_changed(const std::string_view& bucket)
 {
   std::lock_guard<std::mutex> lock(impl->mutex);
   // filter recently trimmed bucket instances out of bucket change counter
   if (impl->trimmed.lookup(bucket)) {
     return;
   }
-  impl->counter.insert(bucket.to_string());
+  impl->counter.insert(std::string(bucket));
 }
 
 RGWCoroutine* BucketTrimManager::create_bucket_trim_cr(RGWHTTPManager *http)

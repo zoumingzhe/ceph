@@ -3,9 +3,8 @@
 
 from __future__ import absolute_import
 
-import time
 
-from .helper import DashboardTestCase, JObj, JLeaf, JList
+from .helper import DashboardTestCase, JList, JObj
 
 
 class GaneshaTest(DashboardTestCase):
@@ -27,7 +26,7 @@ class GaneshaTest(DashboardTestCase):
     @classmethod
     def setUpClass(cls):
         super(GaneshaTest, cls).setUpClass()
-        cls.create_pool('ganesha', 3, 'replicated')
+        cls.create_pool('ganesha', 2**2, 'replicated')
         cls._rados_cmd(['-p', 'ganesha', '-N', 'ganesha1', 'create', 'conf-node1'])
         cls._rados_cmd(['-p', 'ganesha', '-N', 'ganesha1', 'create', 'conf-node2'])
         cls._rados_cmd(['-p', 'ganesha', '-N', 'ganesha1', 'create', 'conf-node3'])
@@ -167,3 +166,38 @@ class GaneshaTest(DashboardTestCase):
         self.assertIn('available', data)
         self.assertIn('message', data)
         self.assertTrue(data['available'])
+
+    def test_ganesha_fsals(self):
+        data = self._get('/ui-api/nfs-ganesha/fsals')
+        self.assertStatus(200)
+        self.assertIn('CEPH', data)
+
+    def test_ganesha_filesystems(self):
+        data = self._get('/ui-api/nfs-ganesha/cephfs/filesystems')
+        self.assertStatus(200)
+        self.assertSchema(data, JList(JObj({
+            'id': int,
+            'name': str
+        })))
+
+    def test_ganesha_lsdir(self):
+        self._get('/ui-api/nfs-ganesha/lsdir')
+        self.assertStatus(500)
+
+    def test_ganesha_buckets(self):
+        data = self._get('/ui-api/nfs-ganesha/rgw/buckets')
+        self.assertStatus(200)
+        schema = JList(str)
+        self.assertSchema(data, schema)
+
+    def test_ganesha_clusters(self):
+        data = self._get('/ui-api/nfs-ganesha/clusters')
+        self.assertStatus(200)
+        schema = JList(str)
+        self.assertSchema(data, schema)
+
+    def test_ganesha_cephx_clients(self):
+        data = self._get('/ui-api/nfs-ganesha/cephx/clients')
+        self.assertStatus(200)
+        schema = JList(str)
+        self.assertSchema(data, schema)

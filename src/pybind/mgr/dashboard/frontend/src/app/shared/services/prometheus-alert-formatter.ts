@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
 
-import * as _ from 'lodash';
+import _ from 'lodash';
 
 import { Icons } from '../../shared/enum/icons.enum';
 import { NotificationType } from '../enum/notification-type.enum';
@@ -69,8 +69,6 @@ export class PrometheusAlertFormatter {
   }
 
   private appendSourceLink(alert: PrometheusCustomAlert, message: string): string {
-    return `${message} <a href="${alert.url}" target="_blank"><i class="${
-      Icons.lineChart
-    }"></i></a>`;
+    return `${message} <a href="${alert.url}" target="_blank"><i class="${Icons.lineChart}"></i></a>`;
   }
 }

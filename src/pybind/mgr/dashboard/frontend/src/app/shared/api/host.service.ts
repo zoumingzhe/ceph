@@ -1,20 +1,53 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
-import { ApiModule } from './api.module';
+import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+import { Daemon } from '../models/daemon.interface';
+import { CdDevice } from '../models/devices';
+import { SmartDataResponseV1 } from '../models/smart';
+import { DeviceService } from '../services/device.service';
 
 @Injectable({
-  providedIn: ApiModule
+  providedIn: 'root'
 })
 export class HostService {
-  constructor(private http: HttpClient) {}
+  baseURL = 'api/host';
 
-  list() {
+  constructor(private http: HttpClient, private deviceService: DeviceService) {}
+
+  list(): Observable<object[]> {
+    return this.http.get<object[]>(this.baseURL);
+  }
+
+  create(hostname: string) {
+    return this.http.post(this.baseURL, { hostname: hostname }, { observe: 'response' });
+  }
+
+  delete(hostname: string) {
+    return this.http.delete(`${this.baseURL}/${hostname}`, { observe: 'response' });
+  }
+
+  getDevices(hostname: string): Observable<CdDevice[]> {
     return this.http
-      .get('api/host')
-      .toPromise()
-      .then((resp: any) => {
-        return resp;
-      });
+      .get<CdDevice[]>(`${this.baseURL}/${hostname}/devices`)
+      .pipe(map((devices) => devices.map((device) => this.deviceService.prepareDevice(device))));
+  }
+
+  getSmartData(hostname: string) {
+    return this.http.get<SmartDataResponseV1>(`${this.baseURL}/${hostname}/smart`);
+  }
+
+  getDaemons(hostname: string): Observable<Daemon[]> {
+    return this.http.get<Daemon[]>(`${this.baseURL}/${hostname}/daemons`);
+  }
+
+  getLabels(): Observable<string[]> {
+    return this.http.get<string[]>('ui-api/host/labels');
+  }
+
+  update(hostname: string, labels: string[]) {
+    return this.http.put(`${this.baseURL}/${hostname}`, { labels: labels });
   }
 }

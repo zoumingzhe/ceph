@@ -1,11 +1,10 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #include "rgw_common.h"
 #include "rgw_rest_client.h"
 #include "rgw_auth_s3.h"
 #include "rgw_http_errors.h"
-#include "rgw_rados.h"
 
 #include "common/armor.h"
 #include "common/strtol.h"
@@ -137,7 +136,7 @@ int RGWRESTSimpleRequest::execute(RGWAccessKey& key, const char *_method, const 
   headers.push_back(pair<string, string>("HTTP_DATE", date_str));
 
   string canonical_header;
-  map<string, string> meta_map;
+  meta_map_t meta_map;
   map<string, string> sub_resources;
 
   rgw_create_s3_canonical_header(method.c_str(), NULL, NULL, date_str.c_str(),
@@ -292,7 +291,7 @@ int RGWRESTSimpleRequest::forward_request(RGWAccessKey& key, req_info& info, siz
     headers.emplace_back(kv);
   }
 
-  map<string, string>& meta_map = new_info.x_meta_map;
+  meta_map_t& meta_map = new_info.x_meta_map;
   for (const auto& kv: meta_map) {
     headers.emplace_back(kv);
   }
@@ -335,7 +334,7 @@ int RGWRESTSimpleRequest::forward_request(RGWAccessKey& key, req_info& info, siz
   response.append((char)0); /* NULL terminate response */
 
   if (outbl) {
-    outbl->claim(response);
+    *outbl = std::move(response);
   }
 
   return status;
@@ -426,7 +425,7 @@ static void grants_by_type_add_perm(map<int, string>& grants_by_type, int perm, 
   }
 }
 
-static void add_grants_headers(map<int, string>& grants, RGWEnv& env, map<string, string>& meta_map)
+static void add_grants_headers(map<int, string>& grants, RGWEnv& env, meta_map_t& meta_map)
 {
   struct grant_type_to_header *t;
 
@@ -557,17 +556,17 @@ int RGWRESTGenerateHTTPHeaders::sign(RGWAccessKey& key)
   return 0;
 }
 
-void RGWRESTStreamS3PutObj::send_init(rgw_obj& obj)
+void RGWRESTStreamS3PutObj::send_init(rgw::sal::RGWObject* obj)
 {
   string resource_str;
   string resource;
   string new_url = url;
 
   if (host_style == VirtualStyle) {
-    resource_str = obj.get_oid();
-    new_url = obj.bucket.name + "."  + new_url;
+    resource_str = obj->get_oid();
+    new_url = obj->get_bucket()->get_name() + "."  + new_url;
   } else {
-    resource_str = obj.bucket.name + "/" + obj.get_oid();
+    resource_str = obj->get_bucket()->get_name() + "/" + obj->get_oid();
   }
 
   //do not encode slash in object key name
@@ -617,7 +616,7 @@ int RGWRESTStreamS3PutObj::send_ready(RGWAccessKey& key, bool send)
   return 0;
 }
 
-int RGWRESTStreamS3PutObj::put_obj_init(RGWAccessKey& key, rgw_obj& obj, uint64_t obj_size, map<string, bufferlist>& attrs, bool send)
+int RGWRESTStreamS3PutObj::put_obj_init(RGWAccessKey& key, rgw::sal::RGWObject* obj, uint64_t obj_size, map<string, bufferlist>& attrs, bool send)
 {
   send_init(obj);
   return send_ready(key, attrs, send);
@@ -908,13 +907,13 @@ int RGWHTTPStreamRWRequest::receive_data(void *ptr, size_t len, bool *pause)
 }
 
 void RGWHTTPStreamRWRequest::set_stream_write(bool s) {
-  Mutex::Locker wl(write_lock);
+  std::lock_guard wl{write_lock};
   stream_writes = s;
 }
 
 void RGWHTTPStreamRWRequest::unpause_receive()
 {
-  Mutex::Locker req_locker(get_req_lock());
+  std::lock_guard req_locker{get_req_lock()};
   if (!read_paused) {
     _set_read_paused(false);
   }
@@ -922,22 +921,20 @@ void RGWHTTPStreamRWRequest::unpause_receive()
 
 void RGWHTTPStreamRWRequest::add_send_data(bufferlist& bl)
 {
-  Mutex::Locker req_locker(get_req_lock());
-  Mutex::Locker wl(write_lock);
+  std::scoped_lock locker{get_req_lock(), write_lock};
   outbl.claim_append(bl);
   _set_write_paused(false);
 }
 
 uint64_t RGWHTTPStreamRWRequest::get_pending_send_size()
 {
-  Mutex::Locker wl(write_lock);
+  std::lock_guard wl{write_lock};
   return outbl.length();
 }
 
 void RGWHTTPStreamRWRequest::finish_write()
 {
-  Mutex::Locker req_locker(get_req_lock());
-  Mutex::Locker wl(write_lock);
+  std::scoped_lock locker{get_req_lock(), write_lock};
   write_stream_complete = true;
   _set_write_paused(false);
 }
@@ -947,7 +944,7 @@ int RGWHTTPStreamRWRequest::send_data(void *ptr, size_t len, bool *pause)
   uint64_t out_len;
   uint64_t send_size;
   {
-    Mutex::Locker wl(write_lock);
+    std::lock_guard wl{write_lock};
 
     if (outbl.length() == 0) {
       if ((stream_writes && !write_stream_complete) ||

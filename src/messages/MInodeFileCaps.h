@@ -16,22 +16,23 @@
 #ifndef CEPH_MINODEFILECAPS_H
 #define CEPH_MINODEFILECAPS_H
 
-#include "msg/Message.h"
+#include "messages/MMDSOp.h"
 
-class MInodeFileCaps : public Message {
+class MInodeFileCaps : public MMDSOp {
 private:
+  static constexpr int HEAD_VERSION = 1;
+  static constexpr int COMPAT_VERSION = 1;
   inodeno_t ino;
   __u32     caps = 0;
 
- public:
-
+public:
   inodeno_t get_ino() const { return ino; }
   int       get_caps() const { return caps; }
 
 protected:
-  MInodeFileCaps() : Message{MSG_MDS_INODEFILECAPS} {}
+  MInodeFileCaps() : MMDSOp(MSG_MDS_INODEFILECAPS, HEAD_VERSION, COMPAT_VERSION) {}
   MInodeFileCaps(inodeno_t ino, int caps) :
-    Message{MSG_MDS_INODEFILECAPS} {
+    MMDSOp(MSG_MDS_INODEFILECAPS, HEAD_VERSION, COMPAT_VERSION) {
     this->ino = ino;
     this->caps = caps;
   }
@@ -39,7 +40,7 @@ protected:
 
 public:
   std::string_view get_type_name() const override { return "inode_file_caps";}
-  void print(ostream& out) const override {
+  void print(std::ostream& out) const override {
     out << "inode_file_caps(" << ino << " " << ccap_string(caps) << ")";
   }
   

@@ -25,9 +25,6 @@
 
 #define dout_subsys ceph_subsys_
 
-#define _STR(x) #x
-#define STRINGIFY(x) _STR(x)
-
 #ifndef WITH_SEASTAR
 CephContext *common_preinit(const CephInitParameters &iparams,
 			    enum code_environment_t code_env, int flags)
@@ -67,12 +64,14 @@ CephContext *common_preinit(const CephInitParameters &iparams,
     conf.set_val_default("log_flush_on_exit", "false");
   }
 
+  conf.set_val("no_config_file", iparams.no_config_file ? "true" : "false");
+
   return cct;
 }
 #endif	// #ifndef WITH_SEASTAR
 
 void complain_about_parse_error(CephContext *cct,
-				const string& parse_error)
+				const std::string& parse_error)
 {
   if (parse_error.empty())
     return;

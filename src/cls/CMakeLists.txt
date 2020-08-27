@@ -148,7 +148,9 @@ set_target_properties(cls_timeindex PROPERTIES
   CXX_VISIBILITY_PRESET hidden)
 install(TARGETS cls_timeindex DESTINATION ${cls_dir})
 
-set(cls_timeindex_client_srcs timeindex/cls_timeindex_client.cc)
+set(cls_timeindex_client_srcs
+  timeindex/cls_timeindex_types.cc
+  timeindex/cls_timeindex_client.cc)
 add_library(cls_timeindex_client STATIC ${cls_timeindex_client_srcs})
 
 
@@ -249,9 +251,18 @@ set(cls_lua_client_srcs
 add_library(cls_lua_client STATIC ${cls_lua_client_srcs})
 
 # cls_cas
+set(cls_cas_client_srcs
+  cas/cls_cas_client.cc)
+add_library(cls_cas_client STATIC ${cls_cas_client_srcs})
+
+set(cls_cas_internal_srcs
+  cas/cls_cas_internal.cc)
+add_library(cls_cas_internal STATIC ${cls_cas_internal_srcs})
+
 set(cls_cas_srcs 
   cas/cls_cas.cc)
 add_library(cls_cas SHARED ${cls_cas_srcs})
+target_link_libraries(cls_cas cls_cas_internal)
 set_target_properties(cls_cas PROPERTIES
   VERSION "1.0.0"
   SOVERSION "1"
@@ -259,6 +270,58 @@ set_target_properties(cls_cas PROPERTIES
   CXX_VISIBILITY_PRESET hidden)
 install(TARGETS cls_cas DESTINATION ${cls_dir})
 
-set(cls_cas_client_srcs
-  cas/cls_cas_client.cc)
-add_library(cls_cas_client STATIC ${cls_cas_client_srcs})
+
+#cls_queue
+set(cls_queue_srcs
+  queue/cls_queue.cc
+  queue/cls_queue_src.cc
+  ${CMAKE_SOURCE_DIR}/src/common/ceph_json.cc)
+add_library(cls_queue SHARED ${cls_queue_srcs})
+set_target_properties(cls_queue PROPERTIES
+  VERSION "1.0.0"
+  SOVERSION "1"
+  INSTALL_RPATH ""
+  CXX_VISIBILITY_PRESET hidden)
+install(TARGETS cls_queue DESTINATION ${cls_dir})
+
+set(cls_queue_client_srcs
+  queue/cls_queue_client.cc)
+add_library(cls_queue_client STATIC ${cls_queue_client_srcs})
+
+# cls_rgw_gc
+if (WITH_RADOSGW)
+  set(cls_rgw_gc_srcs
+    rgw_gc/cls_rgw_gc.cc
+    queue/cls_queue_src.cc
+    ${CMAKE_SOURCE_DIR}/src/common/ceph_json.cc)
+  add_library(cls_rgw_gc SHARED ${cls_rgw_gc_srcs})
+  set_target_properties(cls_rgw_gc PROPERTIES
+    VERSION "1.0.0"
+    SOVERSION "1"
+    INSTALL_RPATH ""
+    CXX_VISIBILITY_PRESET hidden)
+  install(TARGETS cls_rgw_gc DESTINATION ${cls_dir})
+
+  set(cls_rgw_gc_client_srcs
+    rgw_gc/cls_rgw_gc_client.cc)
+  add_library(cls_rgw_gc_client STATIC ${cls_rgw_gc_client_srcs})
+endif (WITH_RADOSGW)
+
+#cls_2pc_queue
+set(cls_2pc_queue_srcs
+  2pc_queue/cls_2pc_queue.cc
+  queue/cls_queue_src.cc
+  ${CMAKE_SOURCE_DIR}/src/common/ceph_json.cc)
+add_library(cls_2pc_queue SHARED ${cls_2pc_queue_srcs})
+set_target_properties(cls_2pc_queue PROPERTIES
+  VERSION "1.0.0"
+  SOVERSION "1"
+  INSTALL_RPATH ""
+  CXX_VISIBILITY_PRESET hidden)
+install(TARGETS cls_2pc_queue DESTINATION ${cls_dir})
+
+set(cls_2pc_queue_client_srcs
+  2pc_queue/cls_2pc_queue_client.cc)
+add_library(cls_2pc_queue_client STATIC ${cls_2pc_queue_client_srcs})
+
+add_subdirectory(cmpomap)

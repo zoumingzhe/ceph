@@ -6,8 +6,9 @@
 #include "cls/lock/cls_lock_types.h"
 #include "common/dout.h"
 #include "common/errno.h"
-#include "common/WorkQueue.h"
 #include "include/stringify.h"
+#include "librbd/cache/rwl/InitRequest.h"
+#include "librbd/cache/rwl/ShutdownRequest.h"
 #include "librbd/ExclusiveLock.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageState.h"
@@ -108,14 +109,14 @@ void PostAcquireRequest<I>::send_open_journal() {
 
   bool journal_enabled;
   {
-    RWLock::RLocker image_locker(m_image_ctx.image_lock);
+    std::shared_lock image_locker{m_image_ctx.image_lock};
     journal_enabled = (m_image_ctx.test_features(RBD_FEATURE_JOURNALING,
                                                  m_image_ctx.image_lock) &&
                        !m_image_ctx.get_journal_policy()->journal_disabled());
   }
   if (!journal_enabled) {
     apply();
-    finish();
+    send_open_image_cache();
     return;
   }
 
@@ -153,10 +154,10 @@ void PostAcquireRequest<I>::send_allocate_journal_tag() {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 10) << dendl;
 
-  RWLock::RLocker image_locker(m_image_ctx.image_lock);
+  std::shared_lock image_locker{m_image_ctx.image_lock};
   using klass = PostAcquireRequest<I>;
   Context *ctx = create_context_callback<
-    klass, &klass::handle_allocate_journal_tag>(this);
+    klass, &klass::handle_allocate_journal_tag>(this, m_journal);
   m_image_ctx.get_journal_policy()->allocate_tag_on_lock(ctx);
 }
 
@@ -173,11 +174,73 @@ void PostAcquireRequest<I>::handle_allocate_journal_tag(int r) {
     return;
   }
 
+  send_open_image_cache();
+}
+
+template <typename I>
+void PostAcquireRequest<I>::send_open_image_cache() {
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 10) << dendl;
+
+  using klass = PostAcquireRequest<I>;
+  Context *ctx = create_async_context_callback(
+    m_image_ctx, create_context_callback<
+    klass, &klass::handle_open_image_cache>(this));
+  cache::rwl::InitRequest<I> *req = cache::rwl::InitRequest<I>::create(
+    m_image_ctx, ctx);
+  req->send();
+}
+
+template <typename I>
+void PostAcquireRequest<I>::handle_open_image_cache(int r) {
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 10) << "r=" << r << dendl;
+
+  save_result(r);
+  if (r < 0) {
+    lderr(cct) << "failed to open image cache: " << cpp_strerror(r)
+               << dendl;
+    send_close_image_cache();
+    return;
+  }
+
   finish();
 }
 
 template <typename I>
+void PostAcquireRequest<I>::send_close_image_cache() {
+  if (m_image_ctx.image_cache == nullptr) {
+    send_close_journal();
+  }
+
+  using klass = PostAcquireRequest<I>;
+  Context *ctx = create_context_callback<klass, &klass::handle_close_image_cache>(
+    this);
+  cache::rwl::ShutdownRequest<I> *req = cache::rwl::ShutdownRequest<I>::create(
+    m_image_ctx, ctx);
+  req->send();
+}
+
+template <typename I>
+void PostAcquireRequest<I>::handle_close_image_cache(int r) {
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 10) << "r=" << r << dendl;
+
+  save_result(r);
+  if (r < 0) {
+    lderr(cct) << "failed to close image_cache: " << cpp_strerror(r) << dendl;
+  }
+
+  send_close_journal();
+}
+
+template <typename I>
 void PostAcquireRequest<I>::send_close_journal() {
+  if (m_journal == nullptr) {
+    send_close_object_map();
+    return;
+  }
+
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 10) << dendl;
 
@@ -225,7 +288,7 @@ void PostAcquireRequest<I>::handle_open_object_map(int r) {
 
   if (r < 0) {
     lderr(cct) << "failed to open object map: " << cpp_strerror(r) << dendl;
-    delete m_object_map;
+    m_object_map->put();
     m_object_map = nullptr;
 
     if (r != -EFBIG) {
@@ -272,7 +335,7 @@ void PostAcquireRequest<I>::handle_close_object_map(int r) {
 template <typename I>
 void PostAcquireRequest<I>::apply() {
   {
-    RWLock::WLocker image_locker(m_image_ctx.image_lock);
+    std::unique_lock image_locker{m_image_ctx.image_lock};
     ceph_assert(m_image_ctx.object_map == nullptr);
     m_image_ctx.object_map = m_object_map;
 
@@ -286,12 +349,16 @@ void PostAcquireRequest<I>::apply() {
 
 template <typename I>
 void PostAcquireRequest<I>::revert() {
-  RWLock::WLocker image_locker(m_image_ctx.image_lock);
+  std::unique_lock image_locker{m_image_ctx.image_lock};
   m_image_ctx.object_map = nullptr;
   m_image_ctx.journal = nullptr;
 
-  delete m_object_map;
-  delete m_journal;
+  if (m_object_map) {
+    m_object_map->put();
+  }
+  if (m_journal) {
+    m_journal->put();
+  }
 
   ceph_assert(m_error_result < 0);
 }

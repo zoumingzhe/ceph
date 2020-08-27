@@ -1,7 +1,10 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
+#include <boost/bind/bind.hpp>
 #include "CacheClient.h"
+#include "common/Cond.h"
+#include "common/version.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_immutable_obj_cache
@@ -16,8 +19,7 @@ namespace immutable_obj_cache {
     : m_cct(ceph_ctx), m_io_service_work(m_io_service),
       m_dm_socket(m_io_service), m_ep(stream_protocol::endpoint(file)),
       m_io_thread(nullptr), m_session_work(false), m_writing(false),
-      m_reading(false), m_sequence_id(0),
-      m_lock("ceph::cache::cacheclient::m_lock") {
+      m_reading(false), m_sequence_id(0) {
     m_worker_thread_num =
       m_cct->_conf.get_val<uint64_t>(
         "immutable_object_cache_client_dedicated_thread_num");
@@ -58,6 +60,7 @@ namespace immutable_obj_cache {
         thd->join();
         delete thd;
       }
+      delete m_worker_io_service_work;
       delete m_worker;
     }
     return 0;
@@ -77,7 +80,7 @@ namespace immutable_obj_cache {
   int CacheClient::connect() {
     int ret = -1;
     C_SaferCond cond;
-    Context* on_finish = new FunctionContext([&cond, &ret](int err) {
+    Context* on_finish = new LambdaContext([&cond, &ret](int err) {
       ret = err;
       cond.complete(err);
     });
@@ -120,7 +123,7 @@ namespace immutable_obj_cache {
     req->encode();
 
     {
-      Mutex::Locker locker(m_lock);
+      std::lock_guard locker{m_lock};
       m_outcoming_bl.append(req->get_payload_bufferlist());
       ceph_assert(m_seq_to_req.find(req->seq) == m_seq_to_req.end());
       m_seq_to_req[req->seq] = req;
@@ -145,7 +148,7 @@ namespace immutable_obj_cache {
     ldout(m_cct, 20) << dendl;
     bufferlist bl;
     {
-      Mutex::Locker locker(m_lock);
+      std::lock_guard locker{m_lock};
       bl.swap(m_outcoming_bl);
       ceph_assert(m_outcoming_bl.length() == 0);
     }
@@ -163,7 +166,7 @@ namespace immutable_obj_cache {
         ceph_assert(cb == bl.length());
 
         {
-           Mutex::Locker locker(m_lock);
+	  std::lock_guard locker{m_lock};
            if (m_outcoming_bl.length() == 0) {
              m_writing.store(false);
              return;
@@ -258,7 +261,7 @@ namespace immutable_obj_cache {
     process(reply, reply->seq);
 
     {
-      Mutex::Locker locker(m_lock);
+      std::lock_guard locker{m_lock};
       if (m_seq_to_req.size() == 0 && m_outcoming_bl.length()) {
         m_reading.store(false);
         return;
@@ -273,14 +276,14 @@ namespace immutable_obj_cache {
     ldout(m_cct, 20) << dendl;
     ObjectCacheRequest* current_request = nullptr;
     {
-      Mutex::Locker locker(m_lock);
+      std::lock_guard locker{m_lock};
       ceph_assert(m_seq_to_req.find(seq_id) != m_seq_to_req.end());
       current_request = m_seq_to_req[seq_id];
       m_seq_to_req.erase(seq_id);
     }
 
     ceph_assert(current_request != nullptr);
-    auto process_reply = new FunctionContext([current_request, reply]
+    auto process_reply = new LambdaContext([current_request, reply]
       (bool dedicated) {
        if (dedicated) {
          // dedicated thrad to execute this context.
@@ -360,7 +363,7 @@ namespace immutable_obj_cache {
     /* all pending request, which have entered into ASIO,
      * will be re-dispatched to RADOS.*/
     {
-      Mutex::Locker locker(m_lock);
+      std::lock_guard locker{m_lock};
       for (auto it : m_seq_to_req) {
         it.second->type = RBDSC_READ_RADOS;
         it.second->process_msg->complete(it.second);
@@ -376,7 +379,8 @@ namespace immutable_obj_cache {
   // TODO : re-implement this method
   int CacheClient::register_client(Context* on_finish) {
     ObjectCacheRequest* reg_req = new ObjectCacheRegData(RBDSC_REGISTER,
-                                                         m_sequence_id++);
+                                                         m_sequence_id++,
+                                                         ceph_version_to_str());
     reg_req->encode();
 
     bufferlist bl;

@@ -20,6 +20,7 @@
 #include "msg/Dispatcher.h"
 #include "msg/Messenger.h"
 #include "auth/Auth.h"
+#include "common/async/context_pool.h"
 #include "common/Finisher.h"
 #include "common/Timer.h"
 
@@ -36,8 +37,9 @@ protected:
   Messenger *messenger;
   MonClient *monc;
 
-  Mutex lock;
+  ceph::mutex lock = ceph::make_mutex("MDSUtility::lock");
   Finisher finisher;
+  ceph::async::io_context_pool poolctx;
 
   Context *waiting_for_mds_map;
 

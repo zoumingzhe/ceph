@@ -5,13 +5,17 @@ import unittest
 
 import cherrypy
 from cherrypy.lib.sessions import RamSession
-from mock import patch
+try:
+    from mock import patch
+except ImportError:
+    from unittest.mock import patch
 
 from . import ControllerTestCase
 from ..services.exception import handle_rados_error
 from ..controllers import RESTController, ApiController, Controller, \
                           BaseController, Proxy
-from ..tools import dict_contains_path, RequestLoggingTool
+from ..tools import dict_contains_path, json_str_to_object, partial_dict,\
+                    dict_get, RequestLoggingTool
 
 
 # pylint: disable=W0613
@@ -66,9 +70,8 @@ class FooArgs(RESTController):
         raise cherrypy.NotFound()
 
 
-# pylint: disable=blacklisted-name
 class Root(object):
-    foo = FooResource()
+    foo_resource = FooResource()
     fooargs = FooArgs()
 
 
@@ -110,11 +113,10 @@ class RESTControllerTest(ControllerTestCase):
     def test_not_implemented(self):
         self._put("/foo")
         self.assertStatus(404)
-        body = self.jsonBody()
+        body = self.json_body()
         self.assertIsInstance(body, dict)
         assert body['detail'] == "The path '/foo' was not found."
         assert '404' in body['status']
-        assert 'traceback' in body
 
     def test_args_from_json(self):
         self._put("/api/fooargs/hello", {'name': 'world'})
@@ -178,3 +180,24 @@ class TestFunctions(unittest.TestCase):
         self.assertTrue(dict_contains_path(x, ['a']))
         self.assertFalse(dict_contains_path(x, ['a', 'c']))
         self.assertTrue(dict_contains_path(x, []))
+
+    def test_json_str_to_object(self):
+        expected_result = {'a': 1, 'b': 'bbb'}
+        self.assertEqual(expected_result, json_str_to_object('{"a": 1, "b": "bbb"}'))
+        self.assertEqual(expected_result, json_str_to_object(b'{"a": 1, "b": "bbb"}'))
+        self.assertEqual('', json_str_to_object(''))
+        self.assertRaises(TypeError, json_str_to_object, None)
+
+    def test_partial_dict(self):
+        expected_result = {'a': 1, 'c': 3}
+        self.assertEqual(expected_result, partial_dict({'a': 1, 'b': 2, 'c': 3}, ['a', 'c']))
+        self.assertEqual({}, partial_dict({'a': 1, 'b': 2, 'c': 3}, []))
+        self.assertEqual({}, partial_dict({}, []))
+        self.assertRaises(KeyError, partial_dict, {'a': 1, 'b': 2, 'c': 3}, ['d'])
+        self.assertRaises(TypeError, partial_dict, None, ['a'])
+        self.assertRaises(TypeError, partial_dict, {'a': 1, 'b': 2, 'c': 3}, None)
+
+    def test_dict_get(self):
+        self.assertFalse(dict_get({'foo': {'bar': False}}, 'foo.bar'))
+        self.assertIsNone(dict_get({'foo': {'bar': False}}, 'foo.bar.baz'))
+        self.assertEqual(dict_get({'foo': {'bar': False}, 'baz': 'xyz'}, 'baz'), 'xyz')

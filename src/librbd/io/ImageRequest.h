@@ -79,11 +79,15 @@ protected:
 	       const ZTracer::Trace &parent_trace)
     : m_image_ctx(image_ctx), m_aio_comp(aio_comp),
       m_image_extents(std::move(image_extents)),
-      m_trace(util::create_trace(image_ctx, trace_name, parent_trace)) {
+      m_trace(librbd::util::create_trace(image_ctx, trace_name, parent_trace)) {
     m_trace.event("start");
   }
 
+  uint64_t get_total_length() const;
 
+  virtual bool finish_request_early() {
+    return false;
+  }
   virtual int clip_request();
   virtual void update_timestamp();
   virtual void send_request() = 0;
@@ -104,6 +108,7 @@ public:
 
 protected:
   int clip_request() override;
+  bool finish_request_early() override;
 
   void send_request() override;
   void send_image_cache_request() override;
@@ -138,6 +143,7 @@ protected:
   }
 
   void send_request() override;
+  bool finish_request_early() override;
 
   virtual int prune_object_extents(
       LightweightObjectExtents* object_extents) const {

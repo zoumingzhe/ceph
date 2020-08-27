@@ -19,6 +19,41 @@ class HealthTest(DashboardTestCase):
         'statuses': JObj({}, allow_unknown=True, unknown_schema=int)
     })
 
+    __mdsmap_schema = JObj({
+        'session_autoclose': int,
+        'balancer': str,
+        'up': JObj({}, allow_unknown=True),
+        'last_failure_osd_epoch': int,
+        'in': JList(int),
+        'last_failure': int,
+        'max_file_size': int,
+        'explicitly_allowed_features': int,
+        'damaged': JList(int),
+        'tableserver': int,
+        'failed': JList(int),
+        'metadata_pool': int,
+        'epoch': int,
+        'stopped': JList(int),
+        'max_mds': int,
+        'compat': JObj({
+            'compat': JObj({}, allow_unknown=True),
+            'ro_compat': JObj({}, allow_unknown=True),
+            'incompat': JObj({}, allow_unknown=True)
+        }),
+        'required_client_features': JObj({}, allow_unknown=True),
+        'data_pools': JList(int),
+        'info': JObj({}, allow_unknown=True),
+        'fs_name': str,
+        'created': str,
+        'standby_count_wanted': int,
+        'enabled': bool,
+        'modified': str,
+        'session_timeout': int,
+        'flags': int,
+        'ever_allowed_features': int,
+        'root': int
+    })
+
     def test_minimal_health(self):
         data = self._get('/api/health/minimal')
         self.assertStatus(200)
@@ -40,25 +75,21 @@ class HealthTest(DashboardTestCase):
             'fs_map': JObj({
                 'filesystems': JList(
                     JObj({
-                        'mdsmap': JObj({
-                            'info': JObj(
-                                {},
-                                allow_unknown=True,
-                                unknown_schema=JObj({
-                                    'state': str
-                                })
-                            )
-                        })
+                        'mdsmap': self.__mdsmap_schema
                     }),
                 ),
-                'standbys': JList(JObj({})),
+                'standbys': JList(JObj({}, allow_unknown=True)),
             }),
             'health': JObj({
-                'checks': JList(str),
+                'checks': JList(JObj({}, allow_unknown=True)),
+                'mutes': JList(JObj({}, allow_unknown=True)),
                 'status': str,
             }),
             'hosts': int,
-            'iscsi_daemons': int,
+            'iscsi_daemons': JObj({
+                'up': int,
+                'down': int
+            }),
             'mgr_map': JObj({
                 'active_name': str,
                 'standbys': JList(JLeaf(dict))
@@ -120,9 +151,13 @@ class HealthTest(DashboardTestCase):
                 'pools': JList(JObj({
                     'stats': JObj({
                         'stored': int,
+                        'stored_data': int,
+                        'stored_omap': int,
                         'objects': int,
                         'kb_used': int,
                         'bytes_used': int,
+                        'data_bytes_used': int,
+                        'omap_bytes_used': int,
                         'percent_used': float,
                         'max_avail': int,
                         'quota_objects': int,
@@ -134,7 +169,8 @@ class HealthTest(DashboardTestCase):
                         'wr_bytes': int,
                         'compress_bytes_used': int,
                         'compress_under_bytes': int,
-                        'stored_raw': int
+                        'stored_raw': int,
+                        'avail_raw': int
                     }),
                     'name': str,
                     'id': int
@@ -146,7 +182,8 @@ class HealthTest(DashboardTestCase):
                     'total_used_raw_bytes': int,
                     'total_used_raw_ratio': float,
                     'num_osds': int,
-                    'num_per_pool_osds': int
+                    'num_per_pool_osds': int,
+                    'num_per_pool_omap_osds': int
                 })
             }),
             'fs_map': JObj({
@@ -164,26 +201,21 @@ class HealthTest(DashboardTestCase):
                 'filesystems': JList(
                     JObj({
                         'id': int,
-                        'mdsmap': JObj({
-                            # TODO: Expand mdsmap schema
-                            'info': JObj(
-                                {},
-                                allow_unknown=True,
-                                unknown_schema=JObj({
-                                    'state': str
-                                }, allow_unknown=True)
-                            )
-                        }, allow_unknown=True)
+                        'mdsmap': self.__mdsmap_schema
                     }),
                 ),
                 'standbys': JList(JObj({}, allow_unknown=True)),
             }),
             'health': JObj({
-                'checks': JList(str),
+                'checks': JList(JObj({}, allow_unknown=True)),
+                'mutes': JList(JObj({}, allow_unknown=True)),
                 'status': str,
             }),
             'hosts': int,
-            'iscsi_daemons': int,
+            'iscsi_daemons': JObj({
+                'up': int,
+                'down': int
+            }),
             'mgr_map': JObj({
                 'active_addr': str,
                 'active_addrs': JObj({
@@ -194,12 +226,10 @@ class HealthTest(DashboardTestCase):
                     }))
                 }),
                 'active_change': str,  # timestamp
+                'active_mgr_features': int,
                 'active_gid': int,
                 'active_name': str,
-                'always_on_modules': JObj(
-                    {},
-                    allow_unknown=True, unknown_schema=JList(str)
-                ),
+                'always_on_modules': JObj({}, allow_unknown=True),
                 'available': bool,
                 'available_modules': JList(module_info_schema),
                 'epoch': int,
@@ -211,9 +241,10 @@ class HealthTest(DashboardTestCase):
                 'standbys': JList(JObj({
                     'available_modules': JList(module_info_schema),
                     'gid': int,
-                    'name': str
-                }))
-            }),
+                    'name': str,
+                    'mgr_features': int
+                }, allow_unknown=True))
+            }, allow_unknown=True),
             'mon_status': JObj({
                 'election_epoch': int,
                 'extra_probe_peers': JList(JAny(none=True)),
@@ -273,7 +304,8 @@ class HealthTest(DashboardTestCase):
             'client_perf': JObj({}, allow_unknown=True),
             'df': JObj({}, allow_unknown=True),
             'health': JObj({
-                'checks': JList(str),
+                'checks': JList(JObj({}, allow_unknown=True)),
+                'mutes': JList(JObj({}, allow_unknown=True)),
                 'status': str
             }),
             'pools': JList(JLeaf(dict)),

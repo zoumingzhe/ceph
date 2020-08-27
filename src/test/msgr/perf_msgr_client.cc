@@ -76,23 +76,23 @@ class MessengerClient {
     ClientDispatcher dispatcher;
 
    public:
-    Mutex lock;
-    Cond cond;
+    ceph::mutex lock = ceph::make_mutex("MessengerBenchmark::ClientThread::lock");
+    ceph::condition_variable cond;
     uint64_t inflight;
 
     ClientThread(Messenger *m, int c, ConnectionRef con, int len, int ops, int think_time_us):
         msgr(m), concurrent(c), conn(con), oid("object-name"), oloc(1, 1), msg_len(len), ops(ops),
-        dispatcher(think_time_us, this), lock("MessengerBenchmark::ClientThread::lock"), inflight(0) {
+        dispatcher(think_time_us, this), inflight(0) {
       m->add_dispatcher_head(&dispatcher);
       bufferptr ptr(msg_len);
       memset(ptr.c_str(), 0, msg_len);
       data.append(ptr);
     }
     void *entry() override {
-      lock.Lock();
+      std::unique_lock locker{lock};
       for (int i = 0; i < ops; ++i) {
         if (inflight > uint64_t(concurrent)) {
-          cond.Wait(lock);
+	  cond.wait(locker);
         }
 	hobject_t hobj(oid, oloc.key, CEPH_NOSNAP, pgid.ps(), pgid.pool(),
 		       oloc.nspace);
@@ -104,7 +104,7 @@ class MessengerClient {
         conn->send_message(m);
         //cerr << __func__ << " send m=" << m << std::endl;
       }
-      lock.Unlock();
+      locker.unlock();
       msgr->shutdown();
       return 0;
     }
@@ -159,20 +159,20 @@ class MessengerClient {
 void MessengerClient::ClientDispatcher::ms_fast_dispatch(Message *m) {
   usleep(think_time);
   m->put();
-  Mutex::Locker l(thread->lock);
+  std::lock_guard l{thread->lock};
   thread->inflight--;
-  thread->cond.Signal();
+  thread->cond.notify_all();
 }
 
 
 void usage(const string &name) {
-  cerr << "Usage: " << name << " [server ip:port] [numjobs] [concurrency] [ios] [thinktime us] [msg length]" << std::endl;
-  cerr << "       [server ip:port]: connect to the ip:port pair" << std::endl;
-  cerr << "       [numjobs]: how much client threads spawned and do benchmark" << std::endl;
-  cerr << "       [concurrency]: the max inflight messages(like iodepth in fio)" << std::endl;
-  cerr << "       [ios]: how much messages sent for each client" << std::endl;
-  cerr << "       [thinktime]: sleep time when do fast dispatching(match client logic)" << std::endl;
-  cerr << "       [msg length]: message data bytes" << std::endl;
+  cout << "Usage: " << name << " [server ip:port] [numjobs] [concurrency] [ios] [thinktime us] [msg length]" << std::endl;
+  cout << "       [server ip:port]: connect to the ip:port pair" << std::endl;
+  cout << "       [numjobs]: how much client threads spawned and do benchmark" << std::endl;
+  cout << "       [concurrency]: the max inflight messages(like iodepth in fio)" << std::endl;
+  cout << "       [ios]: how much messages sent for each client" << std::endl;
+  cout << "       [thinktime]: sleep time when do fast dispatching(match client logic)" << std::endl;
+  cout << "       [msg length]: message data bytes" << std::endl;
 }
 
 int main(int argc, char **argv)
@@ -199,13 +199,13 @@ int main(int argc, char **argv)
 
   std::string public_msgr_type = g_ceph_context->_conf->ms_public_type.empty() ? g_ceph_context->_conf.get_val<std::string>("ms_type") : g_ceph_context->_conf->ms_public_type;
 
-  cerr << " using ms-public-type " << public_msgr_type << std::endl;
-  cerr << "       server ip:port " << args[0] << std::endl;
-  cerr << "       numjobs " << numjobs << std::endl;
-  cerr << "       concurrency " << concurrent << std::endl;
-  cerr << "       ios " << ios << std::endl;
-  cerr << "       thinktime(us) " << think_time << std::endl;
-  cerr << "       message data bytes " << len << std::endl;
+  cout << " using ms-public-type " << public_msgr_type << std::endl;
+  cout << "       server ip:port " << args[0] << std::endl;
+  cout << "       numjobs " << numjobs << std::endl;
+  cout << "       concurrency " << concurrent << std::endl;
+  cout << "       ios " << ios << std::endl;
+  cout << "       thinktime(us) " << think_time << std::endl;
+  cout << "       message data bytes " << len << std::endl;
 
   MessengerClient client(public_msgr_type, args[0], think_time);
 
@@ -214,7 +214,7 @@ int main(int argc, char **argv)
   uint64_t start = Cycles::rdtsc();
   client.start();
   uint64_t stop = Cycles::rdtsc();
-  cerr << " Total op " << ios << " run time " << Cycles::to_microseconds(stop - start) << "us." << std::endl;
+  cout << " Total op " << (ios * numjobs) << " run time " << Cycles::to_microseconds(stop - start) << "us." << std::endl;
 
   return 0;
 }

@@ -9,10 +9,11 @@
 #include "librbd/internal.h"
 #include "librbd/io/AioCompletion.h"
 #include "librbd/io/ImageDispatchSpec.h"
-#include "librbd/io/ImageRequestWQ.h"
+#include "librbd/object_map/DiffRequest.h"
 #include "include/rados/librados.hpp"
 #include "include/interval_set.h"
 #include "common/errno.h"
+#include "common/Cond.h"
 #include "common/Throttle.h"
 #include "osdc/Striper.h"
 #include "librados/snap_set_diff.h"
@@ -238,16 +239,20 @@ int DiffIterate<I>::diff_iterate(I *ictx,
   ldout(ictx->cct, 20) << "diff_iterate " << ictx << " off = " << off
       		 << " len = " << len << dendl;
 
+  if (!ictx->data_ctx.is_valid()) {
+    return -ENODEV;
+  }
+
   // ensure previous writes are visible to listsnaps
   C_SaferCond flush_ctx;
   {
-    RWLock::RLocker owner_locker(ictx->owner_lock);
+    std::shared_lock owner_locker{ictx->owner_lock};
     auto aio_comp = io::AioCompletion::create_and_start(&flush_ctx, ictx,
                                                         io::AIO_TYPE_FLUSH);
-    auto req = io::ImageDispatchSpec<I>::create_flush_request(
-      *ictx, aio_comp, io::FLUSH_SOURCE_INTERNAL, {});
+    auto req = io::ImageDispatchSpec<I>::create_flush(
+      *ictx, io::IMAGE_DISPATCH_LAYER_INTERNAL_START,
+      aio_comp, io::FLUSH_SOURCE_INTERNAL, {});
     req->send();
-    delete req;
   }
   int r = flush_ctx.wait();
   if (r < 0) {
@@ -259,9 +264,9 @@ int DiffIterate<I>::diff_iterate(I *ictx,
     return r;
   }
 
-  ictx->image_lock.get_read();
+  ictx->image_lock.lock_shared();
   r = clip_io(ictx, off, &len);
-  ictx->image_lock.put_read();
+  ictx->image_lock.unlock_shared();
   if (r < 0) {
     return r;
   }
@@ -276,13 +281,15 @@ template <typename I>
 int DiffIterate<I>::execute() {
   CephContext* cct = m_image_ctx.cct;
 
+  ceph_assert(m_image_ctx.data_ctx.is_valid());
+
   librados::IoCtx head_ctx;
   librados::snap_t from_snap_id = 0;
   librados::snap_t end_snap_id;
   uint64_t from_size = 0;
   uint64_t end_size;
   {
-    RWLock::RLocker image_locker(m_image_ctx.image_lock);
+    std::shared_lock image_locker{m_image_ctx.image_lock};
     head_ctx.dup(m_image_ctx.data_ctx);
     if (m_from_snap_name) {
       from_snap_id = m_image_ctx.get_snap_id(m_from_snap_namespace, m_from_snap_name);
@@ -306,16 +313,19 @@ int DiffIterate<I>::execute() {
   int r;
   bool fast_diff_enabled = false;
   BitVector<2> object_diff_state;
-  {
-    RWLock::RLocker image_locker(m_image_ctx.image_lock);
-    if (m_whole_object && (m_image_ctx.features & RBD_FEATURE_FAST_DIFF) != 0) {
-      r = diff_object_map(from_snap_id, end_snap_id, &object_diff_state);
-      if (r < 0) {
-        ldout(cct, 5) << "fast diff disabled" << dendl;
-      } else {
-        ldout(cct, 5) << "fast diff enabled" << dendl;
-        fast_diff_enabled = true;
-      }
+  if (m_whole_object) {
+    C_SaferCond ctx;
+    auto req = object_map::DiffRequest<I>::create(&m_image_ctx, from_snap_id,
+                                                  end_snap_id,
+                                                  &object_diff_state, &ctx);
+    req->send();
+
+    r = ctx.wait();
+    if (r < 0) {
+      ldout(cct, 5) << "fast diff disabled" << dendl;
+    } else {
+      ldout(cct, 5) << "fast diff enabled" << dendl;
+      fast_diff_enabled = true;
     }
   }
 
@@ -330,7 +340,7 @@ int DiffIterate<I>::execute() {
   DiffContext diff_context(m_image_ctx, m_callback, m_callback_arg,
                            m_whole_object, from_snap_id, end_snap_id);
   if (m_include_parent && from_snap_id == 0) {
-    RWLock::RLocker image_locker(m_image_ctx.image_lock);
+    std::shared_lock image_locker{m_image_ctx.image_lock};
     uint64_t overlap = 0;
     m_image_ctx.get_parent_overlap(m_image_ctx.snap_id, &overlap);
     r = 0;
@@ -370,7 +380,25 @@ int DiffIterate<I>::execute() {
 
       if (fast_diff_enabled) {
         const uint64_t object_no = p->second.front().objectno;
-        if (object_diff_state[object_no] != OBJECT_DIFF_STATE_NONE) {
+        if (object_diff_state[object_no] == OBJECT_DIFF_STATE_NONE &&
+            from_snap_id == 0 && !diff_context.parent_diff.empty()) {
+          // no data in child object -- report parent diff instead
+          for (auto& oe : p->second) {
+            for (auto& be : oe.buffer_extents) {
+              interval_set<uint64_t> o;
+              o.insert(off + be.first, be.second);
+              o.intersection_of(diff_context.parent_diff);
+              ldout(cct, 20) << " reporting parent overlap " << o << dendl;
+              for (auto e = o.begin(); e != o.end(); ++e) {
+                r = m_callback(e.get_start(), e.get_len(), true,
+                               m_callback_arg);
+                if (r < 0) {
+                  return r;
+                }
+              }
+            }
+          }
+        } else if (object_diff_state[object_no] != OBJECT_DIFF_STATE_NONE) {
           bool updated = (object_diff_state[object_no] ==
                             OBJECT_DIFF_STATE_UPDATED);
           for (std::vector<ObjectExtent>::iterator q = p->second.begin();
@@ -402,122 +430,6 @@ int DiffIterate<I>::execute() {
   r = diff_context.throttle.wait_for_ret();
   if (r < 0) {
     return r;
-  }
-  return 0;
-}
-
-template <typename I>
-int DiffIterate<I>::diff_object_map(uint64_t from_snap_id, uint64_t to_snap_id,
-                                    BitVector<2>* object_diff_state) {
-  ceph_assert(m_image_ctx.image_lock.is_locked());
-  CephContext* cct = m_image_ctx.cct;
-
-  bool diff_from_start = (from_snap_id == 0);
-  if (from_snap_id == 0) {
-    if (!m_image_ctx.snaps.empty()) {
-      from_snap_id = m_image_ctx.snaps.back();
-    } else {
-      from_snap_id = CEPH_NOSNAP;
-    }
-  }
-
-  object_diff_state->clear();
-  uint64_t current_snap_id = from_snap_id;
-  uint64_t next_snap_id = to_snap_id;
-  BitVector<2> prev_object_map;
-  bool prev_object_map_valid = false;
-  while (true) {
-    uint64_t current_size = m_image_ctx.size;
-    if (current_snap_id != CEPH_NOSNAP) {
-      std::map<librados::snap_t, SnapInfo>::const_iterator snap_it =
-        m_image_ctx.snap_info.find(current_snap_id);
-      ceph_assert(snap_it != m_image_ctx.snap_info.end());
-      current_size = snap_it->second.size;
-
-      ++snap_it;
-      if (snap_it != m_image_ctx.snap_info.end()) {
-        next_snap_id = snap_it->first;
-      } else {
-        next_snap_id = CEPH_NOSNAP;
-      }
-    }
-
-    uint64_t flags;
-    int r = m_image_ctx.get_flags(from_snap_id, &flags);
-    if (r < 0) {
-      lderr(cct) << "diff_object_map: failed to retrieve image flags" << dendl;
-      return r;
-    }
-    if ((flags & RBD_FLAG_FAST_DIFF_INVALID) != 0) {
-      ldout(cct, 1) << "diff_object_map: cannot perform fast diff on invalid "
-                    << "object map" << dendl;
-      return -EINVAL;
-    }
-
-    BitVector<2> object_map;
-    std::string oid(ObjectMap<>::object_map_name(m_image_ctx.id,
-                                                 current_snap_id));
-    r = cls_client::object_map_load(&m_image_ctx.md_ctx, oid, &object_map);
-    if (r < 0) {
-      lderr(cct) << "diff_object_map: failed to load object map " << oid
-                 << dendl;
-      return r;
-    }
-    ldout(cct, 20) << "diff_object_map: loaded object map " << oid << dendl;
-
-    uint64_t num_objs = Striper::get_num_objects(m_image_ctx.layout,
-                                                 current_size);
-    if (object_map.size() < num_objs) {
-      ldout(cct, 1) << "diff_object_map: object map too small: "
-                    << object_map.size() << " < " << num_objs << dendl;
-      return -EINVAL;
-    }
-    object_map.resize(num_objs);
-    object_diff_state->resize(object_map.size());
-
-    uint64_t overlap = std::min(object_map.size(), prev_object_map.size());
-    auto it = object_map.begin();
-    auto overlap_end_it = it + overlap;
-    auto pre_it = prev_object_map.begin();
-    auto diff_it = object_diff_state->begin();
-    uint64_t i = 0;
-    for (; it != overlap_end_it; ++it, ++pre_it, ++diff_it, ++i) {
-      ldout(cct, 20) << __func__ << ": object state: " << i << " "
-                     << static_cast<uint32_t>(*pre_it)
-                     << "->" << static_cast<uint32_t>(*it) << dendl;
-      if (*it == OBJECT_NONEXISTENT) {
-        if (*pre_it != OBJECT_NONEXISTENT) {
-          *diff_it = OBJECT_DIFF_STATE_HOLE;
-        }
-      } else if (*it == OBJECT_EXISTS ||
-                 (*pre_it != *it &&
-                  !(*pre_it == OBJECT_EXISTS &&
-                    *it == OBJECT_EXISTS_CLEAN))) {
-        *diff_it = OBJECT_DIFF_STATE_UPDATED;
-      }
-    }
-    ldout(cct, 20) << "diff_object_map: computed overlap diffs" << dendl;
-    auto end_it = object_map.end();
-    if (object_map.size() > prev_object_map.size() &&
-        (diff_from_start || prev_object_map_valid)) {
-      for (; it != end_it; ++it,++diff_it, ++i) {
-        ldout(cct, 20) << __func__ << ": object state: " << i << " "
-                       << "->" << static_cast<uint32_t>(*it) << dendl;
-        if (*it == OBJECT_NONEXISTENT) {
-          *diff_it = OBJECT_DIFF_STATE_NONE;
-        } else {
-          *diff_it = OBJECT_DIFF_STATE_UPDATED;
-        }
-      }
-    }
-    ldout(cct, 20) << "diff_object_map: computed resize diffs" << dendl;
-
-    if (current_snap_id == next_snap_id || next_snap_id > to_snap_id) {
-      break;
-    }
-    current_snap_id = next_snap_id;
-    prev_object_map = object_map;
-    prev_object_map_valid = true;
   }
   return 0;
 }

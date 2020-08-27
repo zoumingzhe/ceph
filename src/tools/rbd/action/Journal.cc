@@ -461,9 +461,6 @@ protected:
     JournalPlayer *journal;
     explicit ReplayHandler(JournalPlayer *_journal) : journal(_journal) {}
 
-    void get() override {}
-    void put() override {}
-
     void handle_entries_available() override {
       journal->handle_replay_ready();
     }
@@ -1168,7 +1165,7 @@ int execute_export(const po::variables_map &vm,
     return r;
   }
 
-  r = do_export_journal(io_ctx, journal_name, path, vm[at::NO_ERROR].as<bool>(),
+  r = do_export_journal(io_ctx, journal_name, path, vm[at::NO_ERR].as<bool>(),
 			vm[at::VERBOSE].as<bool>());
   if (r < 0) {
     std::cerr << "rbd: journal export: " << cpp_strerror(r) << std::endl;
@@ -1211,7 +1208,7 @@ int execute_import(const po::variables_map &vm,
     return r;
   }
 
-  r = do_import_journal(io_ctx, journal_name, path, vm[at::NO_ERROR].as<bool>(),
+  r = do_import_journal(io_ctx, journal_name, path, vm[at::NO_ERR].as<bool>(),
 			vm[at::VERBOSE].as<bool>());
   if (r < 0) {
     std::cerr << "rbd: journal import: " << cpp_strerror(r) << std::endl;

@@ -12,7 +12,7 @@ three types of daemons:
 - :term:`Ceph Manager` (``ceph-mgr``)
 - :term:`Ceph OSD Daemon` (``ceph-osd``)
 
-Ceph Storage Clusters that support the :term:`Ceph Filesystem` run at
+Ceph Storage Clusters that support the :term:`Ceph File System` run at
 least one :term:`Ceph Metadata Server` (``ceph-mds``). Clusters that
 support :term:`Ceph Object Storage` run Ceph Gateway daemons
 (``radosgw``).
@@ -55,6 +55,8 @@ local configuration file.  The process will then contact the monitor
 cluster to retrieve configuration stored centrally for the entire
 cluster.  Once a complete view of the configuration is available, the
 daemon or process startup will proceed.
+
+.. _bootstrap-options:
 
 Bootstrap options
 -----------------
@@ -144,12 +146,12 @@ These sections include:
               the Ceph Storage Cluster, and override the same setting in
               ``global``.
 
-:Example: ``mds_cache_size = 10G``
+:Example: ``mds_cache_memory_limit = 10G``
 
 ``client``
 
 :Description: Settings under ``client`` affect all Ceph Clients
-              (e.g., mounted Ceph Filesystems, mounted Ceph Block Devices,
+              (e.g., mounted Ceph File Systems, mounted Ceph Block Devices,
               etc.) as well as Rados Gateway (RGW) daemons.
 
 :Example: ``objecter_inflight_ops = 512``

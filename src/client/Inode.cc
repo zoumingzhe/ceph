@@ -232,6 +232,7 @@ void Inode::try_touch_cap(mds_rank_t mds)
  * This is the bog standard "check whether we have the required caps" operation.
  * Typically, we only check against the capset that is currently "issued".
  * In other words, we ignore caps that have been revoked but not yet released.
+ * Also account capability hit/miss stats.
  *
  * Some callers (particularly those doing attribute retrieval) can also make
  * use of the full set of "implemented" caps to satisfy requests from the
@@ -252,6 +253,7 @@ bool Inode::caps_issued_mask(unsigned mask, bool allow_impl)
       cap_is_valid(*auth_cap) &&
       (auth_cap->issued & mask) == mask) {
     auth_cap->touch();
+    client->cap_hit();
     return true;
   }
   // try any cap
@@ -260,6 +262,7 @@ bool Inode::caps_issued_mask(unsigned mask, bool allow_impl)
     if (cap_is_valid(cap)) {
       if ((cap.issued & mask) == mask) {
         cap.touch();
+	client->cap_hit();
 	return true;
       }
       c |= cap.issued;
@@ -275,8 +278,11 @@ bool Inode::caps_issued_mask(unsigned mask, bool allow_impl)
     for (auto &pair : caps) {
       pair.second.touch();
     }
+    client->cap_hit();
     return true;
   }
+
+  client->cap_miss();
   return false;
 }
 
@@ -443,12 +449,6 @@ void Inode::dump(Formatter *f) const
   f->dump_unsigned("flags", flags);
 
   if (is_dir()) {
-    if (!dir_contacts.empty()) {
-      f->open_object_section("dir_contants");
-      for (set<int>::iterator p = dir_contacts.begin(); p != dir_contacts.end(); ++p)
-	f->dump_int("mds", *p);
-      f->close_section();
-    }
     f->dump_int("dir_hashed", (int)dir_hashed);
     f->dump_int("dir_replicated", (int)dir_replicated);
   }
@@ -534,7 +534,7 @@ void Inode::dump(Formatter *f) const
 
   if (!dentries.empty()) {
     f->open_array_section("parents");
-    for (const auto &dn : dentries) {
+    for (const auto &&dn : dentries) {
       f->open_object_section("dentry");
       f->dump_stream("dir_ino") << dn->dir->parent_inode->ino;
       f->dump_string("name", dn->name);

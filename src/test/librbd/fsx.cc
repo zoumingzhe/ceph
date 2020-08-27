@@ -277,11 +277,6 @@ struct ReplayHandler : public journal::ReplayHandler {
                   on_finish(on_finish) {
         }
 
-        void get() override {
-        }
-        void put() override {
-        }
-
         void handle_entries_available() override {
                 while (true) {
                         journal::ReplayEntry replay_entry;
@@ -860,7 +855,7 @@ __librbd_deep_copy(struct rbd_ctx *ctx, const char *src_snapname,
 int
 __librbd_clone(struct rbd_ctx *ctx, const char *src_snapname,
 	       const char *dst_imagename, int *order, int stripe_unit,
-	       int stripe_count, bool krbd)
+	       int stripe_count)
 {
 	int ret;
 
@@ -884,12 +879,6 @@ __librbd_clone(struct rbd_ctx *ctx, const char *src_snapname,
                 return ret;
         }
 
-	if (krbd) {
-		features &= ~(RBD_FEATURE_OBJECT_MAP     |
-                              RBD_FEATURE_FAST_DIFF      |
-                              RBD_FEATURE_DEEP_FLATTEN   |
-                              RBD_FEATURE_JOURNALING);
-	}
 	if (deep_copy) {
 		ret = __librbd_deep_copy(ctx, src_snapname, dst_imagename, features,
 					 order, stripe_unit, stripe_count);
@@ -918,7 +907,7 @@ librbd_clone(struct rbd_ctx *ctx, const char *src_snapname,
 	     int stripe_count)
 {
 	return __librbd_clone(ctx, src_snapname, dst_imagename, order,
-			      stripe_unit, stripe_count, false);
+			      stripe_unit, stripe_count);
 }
 
 int
@@ -960,6 +949,7 @@ const struct rbd_operations librbd_operations = {
 int
 krbd_open(const char *name, struct rbd_ctx *ctx)
 {
+	char buf[1024];
 	char *devnode;
 	int fd;
 	int ret;
@@ -968,7 +958,14 @@ krbd_open(const char *name, struct rbd_ctx *ctx)
 	if (ret < 0)
 		return ret;
 
-	ret = krbd_map(krbd, pool, "", name, "", "", &devnode);
+	ret = rados_conf_get(cluster, "rbd_default_map_options", buf,
+			     sizeof(buf));
+	if (ret < 0) {
+		simple_err("Could not get rbd_default_map_options value", ret);
+		return ret;
+	}
+
+	ret = krbd_map(krbd, pool, "", name, "", buf, &devnode);
 	if (ret < 0) {
 		prt("krbd_map(%s) failed\n", name);
 		return ret;
@@ -1186,7 +1183,7 @@ krbd_clone(struct rbd_ctx *ctx, const char *src_snapname,
 		return ret;
 
 	return __librbd_clone(ctx, src_snapname, dst_imagename, order,
-			      stripe_unit, stripe_count, true);
+			      stripe_unit, stripe_count);
 }
 
 int
@@ -1230,6 +1227,7 @@ nbd_open(const char *name, struct rbd_ctx *ctx)
 	SubProcess process("rbd-nbd", SubProcess::KEEP, SubProcess::PIPE,
 			   SubProcess::KEEP);
 	process.add_cmd_arg("map");
+	process.add_cmd_arg("--timeout=600");
 	std::string img;
 	img.append(pool);
 	img.append("/");
@@ -1325,7 +1323,7 @@ nbd_clone(struct rbd_ctx *ctx, const char *src_snapname,
 		return ret;
 
 	return __librbd_clone(ctx, src_snapname, dst_imagename, order,
-			      stripe_unit, stripe_count, false);
+			      stripe_unit, stripe_count);
 }
 
 const struct rbd_operations nbd_operations = {
@@ -1573,7 +1571,7 @@ ggate_clone(struct rbd_ctx *ctx, const char *src_snapname,
 	}
 
 	return __librbd_clone(ctx, src_snapname, dst_imagename, order,
-			      stripe_unit, stripe_count, false);
+			      stripe_unit, stripe_count);
 }
 
 int
@@ -2447,11 +2445,12 @@ void clone_filename(char *buf, size_t len, int clones)
 
 void clone_imagename(char *buf, size_t len, int clones)
 {
-	if (clones > 0)
+	if (clones > 0) {
 		snprintf(buf, len, "%s-clone%d", iname, clones);
-	else
-		strncpy(buf, iname, len);
-        buf[len - 1] = '\0';
+	} else {
+		strncpy(buf, iname, len - 1);
+		buf[len - 1] = '\0';
+	}
 }
 
 void replay_imagename(char *buf, size_t len, int clones)

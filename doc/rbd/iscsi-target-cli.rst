@@ -21,7 +21,7 @@ install, and configure the Ceph iSCSI gateway for basic operation.
 
    -  ``tcmu-runner-1.4.0`` or newer package
 
-   -  ``ceph-iscsi-2.7`` or newer package
+   -  ``ceph-iscsi-3.2`` or newer package
 
      .. important::
         If previous versions of these packages exist, then they must
@@ -149,8 +149,13 @@ For rpm based instructions execute the following commands:
    ::
 
        # systemctl daemon-reload
+       
+       # systemctl enable rbd-target-gw
+       # systemctl start rbd-target-gw
+
        # systemctl enable rbd-target-api
        # systemctl start rbd-target-api
+
 
 **Configuring:**
 

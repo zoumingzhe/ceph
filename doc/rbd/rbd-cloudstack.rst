@@ -14,7 +14,9 @@ and a dual-core processor, but more CPU and RAM will perform better. The
 following diagram depicts the CloudStack/Ceph technology stack.
 
 
-.. ditaa::  +---------------------------------------------------+
+.. ditaa::
+
+            +---------------------------------------------------+
             |                   CloudStack                      |
             +---------------------------------------------------+
             |                     libvirt                       |
@@ -68,7 +70,7 @@ See `Create a Pool`_ for details on specifying the number of placement groups
 for your pools, and `Placement Groups`_ for details on the number of placement
 groups you should set for your pools.
 
-A newly created pool must initialized prior to use. Use the ``rbd`` tool
+A newly created pool must be initialized prior to use. Use the ``rbd`` tool
 to initialize the pool::
 
         rbd pool init cloudstack

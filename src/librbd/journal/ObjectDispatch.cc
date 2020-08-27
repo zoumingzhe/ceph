@@ -3,13 +3,13 @@
 
 #include "librbd/journal/ObjectDispatch.h"
 #include "common/dout.h"
-#include "common/WorkQueue.h"
 #include "osdc/Striper.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Journal.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
 #include "librbd/io/ObjectDispatchSpec.h"
-#include "librbd/io/ObjectDispatcher.h"
+#include "librbd/io/ObjectDispatcherInterface.h"
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -20,6 +20,7 @@ namespace librbd {
 namespace journal {
 
 using librbd::util::data_object_name;
+using util::create_context_callback;
 
 namespace {
 
@@ -95,6 +96,8 @@ bool ObjectDispatch<I>::discard(
   *on_finish = new C_CommitIOEvent<I>(m_image_ctx, m_journal, object_no,
                                       object_off, object_len, *journal_tid,
                                       *object_dispatch_flags, *on_finish);
+  *on_finish = create_context_callback<
+    Context, &Context::complete>(*on_finish, m_journal);
 
   *dispatch_result = io::DISPATCH_RESULT_CONTINUE;
   wait_or_flush_event(*journal_tid, *object_dispatch_flags, on_dispatched);
@@ -104,7 +107,8 @@ bool ObjectDispatch<I>::discard(
 template <typename I>
 bool ObjectDispatch<I>::write(
     uint64_t object_no, uint64_t object_off, ceph::bufferlist&& data,
-    const ::SnapContext &snapc, int op_flags,
+    const ::SnapContext &snapc, int op_flags, int write_flags,
+    std::optional<uint64_t> assert_version,
     const ZTracer::Trace &parent_trace, int* object_dispatch_flags,
     uint64_t* journal_tid, io::DispatchResult* dispatch_result,
     Context** on_finish, Context* on_dispatched) {
@@ -120,6 +124,8 @@ bool ObjectDispatch<I>::write(
   *on_finish = new C_CommitIOEvent<I>(m_image_ctx, m_journal, object_no,
                                       object_off, data.length(), *journal_tid,
                                       *object_dispatch_flags, *on_finish);
+  *on_finish = create_context_callback<
+    Context, &Context::complete>(*on_finish, m_journal);
 
   *dispatch_result = io::DISPATCH_RESULT_CONTINUE;
   wait_or_flush_event(*journal_tid, *object_dispatch_flags, on_dispatched);
@@ -146,6 +152,8 @@ bool ObjectDispatch<I>::write_same(
   *on_finish = new C_CommitIOEvent<I>(m_image_ctx, m_journal, object_no,
                                       object_off, object_len, *journal_tid,
                                       *object_dispatch_flags, *on_finish);
+  *on_finish = create_context_callback<
+    Context, &Context::complete>(*on_finish, m_journal);
 
   *dispatch_result = io::DISPATCH_RESULT_CONTINUE;
   wait_or_flush_event(*journal_tid, *object_dispatch_flags, on_dispatched);
@@ -174,6 +182,8 @@ bool ObjectDispatch<I>::compare_and_write(
                                       object_off, write_data.length(),
                                       *journal_tid, *object_dispatch_flags,
                                       *on_finish);
+  *on_finish = create_context_callback<
+    Context, &Context::complete>(*on_finish, m_journal);
 
   *dispatch_result = io::DISPATCH_RESULT_CONTINUE;
   wait_or_flush_event(*journal_tid, *object_dispatch_flags, on_dispatched);
@@ -194,7 +204,7 @@ bool ObjectDispatch<I>::flush(
   ldout(cct, 20) << dendl;
 
   auto ctx = *on_finish;
-  *on_finish = new FunctionContext(
+  *on_finish = new LambdaContext(
     [image_ctx=m_image_ctx, ctx, journal_tid=*journal_tid](int r) {
       image_ctx->journal->commit_io_event(journal_tid, r);
       ctx->complete(r);
@@ -214,14 +224,16 @@ void ObjectDispatch<I>::extent_overwritten(
   ldout(cct, 20) << object_no << " " << object_off << "~" << object_len
                  << dendl;
 
-  auto ctx = new C_CommitIOEvent<I>(m_image_ctx, m_journal, object_no,
-                                    object_off, object_len, journal_tid, false,
-                                    nullptr);
+  Context *ctx = new C_CommitIOEvent<I>(m_image_ctx, m_journal, object_no,
+                                        object_off, object_len, journal_tid, false,
+                                        nullptr);
   if (new_journal_tid != 0) {
     // ensure new journal event is safely committed to disk before
     // committing old event
     m_journal->flush_event(new_journal_tid, ctx);
   } else {
+    ctx = create_context_callback<
+      Context, &Context::complete>(ctx, m_journal);
     ctx->complete(0);
   }
 }

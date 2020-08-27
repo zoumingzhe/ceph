@@ -51,11 +51,14 @@ using std::stringstream;
 using std::unique_ptr;
 using std::vector;
 
+using ceph::bufferlist;
 using ceph::decode;
 using ceph::decode_nohead;
 using ceph::encode;
 using ceph::encode_nohead;
 using ceph::Formatter;
+using ceph::make_timespan;
+using ceph::JSONFormatter;
 
 using namespace std::literals;
 
@@ -88,6 +91,7 @@ const char *ceph_osd_flag_name(unsigned flag)
   case CEPH_OSD_FLAG_FULL_TRY: return "full_try";
   case CEPH_OSD_FLAG_FULL_FORCE: return "full_force";
   case CEPH_OSD_FLAG_IGNORE_REDIRECT: return "ignore_redirect";
+  case CEPH_OSD_FLAG_RETURNVEC: return "returnvec";
   default: return "???";
   }
 }
@@ -313,7 +317,7 @@ void request_redirect_t::decode(ceph::buffer::list::const_iterator& bl)
   decode(redirect_object, bl);
   decode(legacy_osd_instructions_len, bl);
   if (legacy_osd_instructions_len) {
-    bl.advance(legacy_osd_instructions_len);
+    bl += legacy_osd_instructions_len;
   }
   DECODE_FINISH(bl);
 }
@@ -391,13 +395,14 @@ void objectstore_perf_stat_t::generate_test_instances(std::list<objectstore_perf
 }
 
 // -- osd_stat_t --
-void osd_stat_t::dump(Formatter *f) const
+void osd_stat_t::dump(Formatter *f, bool with_net) const
 {
   f->dump_unsigned("up_from", up_from);
   f->dump_unsigned("seq", seq);
   f->dump_unsigned("num_pgs", num_pgs);
   f->dump_unsigned("num_osds", num_osds);
   f->dump_unsigned("num_per_pool_osds", num_per_pool_osds);
+  f->dump_unsigned("num_per_pool_omap_osds", num_per_pool_omap_osds);
 
   /// dump legacy stats fields to ensure backward compatibility.
   f->dump_unsigned("kb", statfs.kb());
@@ -427,11 +432,73 @@ void osd_stat_t::dump(Formatter *f) const
   f->open_array_section("alerts");
   ::dump(f, os_alerts);
   f->close_section();
+  if (with_net) {
+    dump_ping_time(f);
+  }
+}
+
+void osd_stat_t::dump_ping_time(Formatter *f) const
+{
+  f->open_array_section("network_ping_times");
+  for (auto &i : hb_pingtime) {
+    f->open_object_section("entry");
+    f->dump_int("osd", i.first);
+    const time_t lu(i.second.last_update);
+    char buffer[26];
+    string lustr(ctime_r(&lu, buffer));
+    lustr.pop_back();   // Remove trailing \n
+    f->dump_string("last update", lustr);
+    f->open_array_section("interfaces");
+    f->open_object_section("interface");
+    f->dump_string("interface", "back");
+    f->open_object_section("average");
+    f->dump_float("1min", i.second.back_pingtime[0]/1000.0);
+    f->dump_float("5min", i.second.back_pingtime[1]/1000.0);
+    f->dump_float("15min", i.second.back_pingtime[2]/1000.0);
+    f->close_section(); // average
+    f->open_object_section("min");
+    f->dump_float("1min", i.second.back_min[0]/1000.0);
+    f->dump_float("5min", i.second.back_min[1]/1000.0);
+    f->dump_float("15min", i.second.back_min[2]/1000.0);
+    f->close_section(); // min
+    f->open_object_section("max");
+    f->dump_float("1min", i.second.back_max[0]/1000.0);
+    f->dump_float("5min", i.second.back_max[1]/1000.0);
+    f->dump_float("15min", i.second.back_max[2]/1000.0);
+    f->close_section(); // max
+    f->dump_float("last", i.second.back_last/1000.0);
+    f->close_section(); // interface
+
+    if (i.second.front_pingtime[0] != 0) {
+      f->open_object_section("interface");
+      f->dump_string("interface", "front");
+      f->open_object_section("average");
+      f->dump_float("1min", i.second.front_pingtime[0]/1000.0);
+      f->dump_float("5min", i.second.front_pingtime[1]/1000.0);
+      f->dump_float("15min", i.second.front_pingtime[2]/1000.0);
+      f->close_section(); // average
+      f->open_object_section("min");
+      f->dump_float("1min", i.second.front_min[0]/1000.0);
+      f->dump_float("5min", i.second.front_min[1]/1000.0);
+      f->dump_float("15min", i.second.front_min[2]/1000.0);
+      f->close_section(); // min
+      f->open_object_section("max");
+      f->dump_float("1min", i.second.front_max[0]/1000.0);
+      f->dump_float("5min", i.second.front_max[1]/1000.0);
+      f->dump_float("15min", i.second.front_max[2]/1000.0);
+      f->close_section(); // max
+      f->dump_float("last", i.second.front_last/1000.0);
+      f->close_section(); // interface
+    }
+    f->close_section(); // interfaces
+    f->close_section(); // entry
+  }
+  f->close_section(); // network_ping_time
 }
 
 void osd_stat_t::encode(ceph::buffer::list &bl, uint64_t features) const
 {
-  ENCODE_START(12, 2, bl);
+  ENCODE_START(14, 2, bl);
 
   //////// for compatibility ////////
   int64_t kb = statfs.kb();
@@ -465,6 +532,34 @@ void osd_stat_t::encode(ceph::buffer::list &bl, uint64_t features) const
   encode(num_shards_repaired, bl);
   encode(num_osds, bl);
   encode(num_per_pool_osds, bl);
+  encode(num_per_pool_omap_osds, bl);
+
+  // hb_pingtime map
+  encode((int)hb_pingtime.size(), bl);
+  for (auto i : hb_pingtime) {
+    encode(i.first, bl); // osd
+    encode(i.second.last_update, bl);
+    encode(i.second.back_pingtime[0], bl);
+    encode(i.second.back_pingtime[1], bl);
+    encode(i.second.back_pingtime[2], bl);
+    encode(i.second.back_min[0], bl);
+    encode(i.second.back_min[1], bl);
+    encode(i.second.back_min[2], bl);
+    encode(i.second.back_max[0], bl);
+    encode(i.second.back_max[1], bl);
+    encode(i.second.back_max[2], bl);
+    encode(i.second.back_last, bl);
+    encode(i.second.front_pingtime[0], bl);
+    encode(i.second.front_pingtime[1], bl);
+    encode(i.second.front_pingtime[2], bl);
+    encode(i.second.front_min[0], bl);
+    encode(i.second.front_min[1], bl);
+    encode(i.second.front_min[2], bl);
+    encode(i.second.front_max[0], bl);
+    encode(i.second.front_max[1], bl);
+    encode(i.second.front_max[2], bl);
+    encode(i.second.front_last, bl);
+  }
   ENCODE_FINISH(bl);
 }
 
@@ -472,7 +567,7 @@ void osd_stat_t::decode(ceph::buffer::list::const_iterator &bl)
 {
   int64_t kb, kb_used,kb_avail;
   int64_t kb_used_data, kb_used_omap, kb_used_meta;
-  DECODE_START_LEGACY_COMPAT_LEN(12, 2, 2, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(14, 2, 2, bl);
   decode(kb, bl);
   decode(kb_used, bl);
   decode(kb_avail, bl);
@@ -539,6 +634,43 @@ void osd_stat_t::decode(ceph::buffer::list::const_iterator &bl)
     num_osds = 0;
     num_per_pool_osds = 0;
   }
+  if (struct_v >= 13) {
+    decode(num_per_pool_omap_osds, bl);
+  } else {
+    num_per_pool_omap_osds = 0;
+  }
+  hb_pingtime.clear();
+  if (struct_v >= 14) {
+    int count;
+    decode(count, bl);
+    for (int i = 0 ; i < count ; i++) {
+      int osd;
+      decode(osd, bl);
+      struct Interfaces ifs;
+      decode(ifs.last_update, bl);
+      decode(ifs.back_pingtime[0],bl);
+      decode(ifs.back_pingtime[1], bl);
+      decode(ifs.back_pingtime[2], bl);
+      decode(ifs.back_min[0],bl);
+      decode(ifs.back_min[1], bl);
+      decode(ifs.back_min[2], bl);
+      decode(ifs.back_max[0],bl);
+      decode(ifs.back_max[1], bl);
+      decode(ifs.back_max[2], bl);
+      decode(ifs.back_last, bl);
+      decode(ifs.front_pingtime[0], bl);
+      decode(ifs.front_pingtime[1], bl);
+      decode(ifs.front_pingtime[2], bl);
+      decode(ifs.front_min[0], bl);
+      decode(ifs.front_min[1], bl);
+      decode(ifs.front_min[2], bl);
+      decode(ifs.front_max[0], bl);
+      decode(ifs.front_max[1], bl);
+      decode(ifs.front_max[2], bl);
+      decode(ifs.front_last, bl);
+      hb_pingtime[osd] = ifs;
+    }
+  }
   DECODE_FINISH(bl);
 }
 
@@ -558,6 +690,13 @@ void osd_stat_t::generate_test_instances(std::list<osd_stat_t*>& o)
     "some alert", "some alert details");
   o.back()->os_alerts[1].emplace(
     "some alert2", "some alert2 details");
+  struct Interfaces gen_interfaces = {
+	123456789, { 1000, 900, 800 }, { 990, 890, 790 }, { 1010, 910, 810 }, 1001,
+	 { 1100, 1000, 900 }, { 1090, 990, 890 }, { 1110, 1010, 910 }, 1101 };
+  o.back()->hb_pingtime[20] = gen_interfaces;
+  gen_interfaces = {
+	987654321, { 100, 200, 300 }, { 90, 190, 290 }, { 110, 210, 310 }, 101 };
+  o.back()->hb_pingtime[30] = gen_interfaces;
 }
 
 // -- pg_t --
@@ -1031,6 +1170,10 @@ std::string pg_state_string(uint64_t state)
     oss << "snaptrim_error+";
   if (state & PG_STATE_FAILED_REPAIR)
     oss << "failed_repair+";
+  if (state & PG_STATE_LAGGY)
+    oss << "laggy+";
+  if (state & PG_STATE_WAIT)
+    oss << "wait+";
   string ret(oss.str());
   if (ret.length() > 0)
     ret.resize(ret.length() - 1);
@@ -1104,6 +1247,10 @@ std::optional<uint64_t> pg_string_state(const std::string& state)
     type = PG_STATE_CREATING;
   else if (state == "failed_repair")
     type = PG_STATE_FAILED_REPAIR;
+  else if (state == "laggy")
+    type = PG_STATE_LAGGY;
+  else if (state == "wait")
+    type = PG_STATE_WAIT;
   else if (state == "unknown")
     type = 0;
   else
@@ -1205,7 +1352,9 @@ static opt_mapping_t opt_mapping = boost::assign::map_list_of
            ("target_size_ratio", pool_opts_t::opt_desc_t(
 	     pool_opts_t::TARGET_SIZE_RATIO, pool_opts_t::DOUBLE))
            ("pg_autoscale_bias", pool_opts_t::opt_desc_t(
-	     pool_opts_t::PG_AUTOSCALE_BIAS, pool_opts_t::DOUBLE));
+	     pool_opts_t::PG_AUTOSCALE_BIAS, pool_opts_t::DOUBLE))
+           ("read_lease_interval", pool_opts_t::opt_desc_t(
+	     pool_opts_t::READ_LEASE_INTERVAL, pool_opts_t::DOUBLE));
 
 bool pool_opts_t::is_opt_name(const std::string& name)
 {
@@ -1540,7 +1689,7 @@ bool pg_pool_t::is_removed_snap(snapid_t s) const
     return removed_snaps.contains(s);
 }
 
-snapid_t pg_pool_t::snap_exists(const char *s) const
+snapid_t pg_pool_t::snap_exists(std::string_view s) const
 {
   for (auto p = snaps.cbegin(); p != snaps.cend(); ++p)
     if (p->second.name == s)
@@ -2057,7 +2206,7 @@ void pg_pool_t::decode(ceph::buffer::list::const_iterator& bl)
     pgp_num_target = pgp_num;
     pg_num_pending = pg_num;
     last_force_op_resend = last_force_op_resend_prenautilus;
-    pg_autoscale_mode = PG_AUTOSCALE_MODE_WARN;    // default to warn on upgrade
+    pg_autoscale_mode = pg_autoscale_mode_t::WARN;    // default to warn on upgrade
   }
   DECODE_FINISH(bl);
   calc_pg_masks();
@@ -2140,7 +2289,7 @@ ostream& operator<<(ostream& out, const pg_pool_t& p)
   if (p.get_type_name() == "erasure") {
     out << " profile " << p.erasure_code_profile;
   }
-  out  << " size " << p.get_size()
+  out << " size " << p.get_size()
       << " min_size " << p.get_min_size()
       << " crush_rule " << p.get_crush_rule()
       << " object_hash " << p.get_object_hash_name()
@@ -2155,7 +2304,7 @@ ostream& operator<<(ostream& out, const pg_pool_t& p)
   if (p.get_pg_num_pending() != p.get_pg_num()) {
     out << " pg_num_pending " << p.get_pg_num_pending();
   }
-  if (p.pg_autoscale_mode) {
+  if (p.pg_autoscale_mode != pg_pool_t::pg_autoscale_mode_t::UNKNOWN) {
     out << " autoscale_mode " << p.get_pg_autoscale_mode_name(p.pg_autoscale_mode);
   }
   out << " last_change " << p.get_last_change();
@@ -2969,7 +3118,7 @@ void store_statfs_t::dump(Formatter *f) const
 ostream& operator<<(ostream& out, const store_statfs_t &s)
 {
   out << std::hex
-      << " store_statfs(0x" << s.available
+      << "store_statfs(0x" << s.available
       << "/0x"  << s.internally_reserved
       << "/0x"  << s.total
       << ", data 0x" << s.data_stored
@@ -3109,7 +3258,7 @@ void pool_stat_t::generate_test_instances(list<pool_stat_t*>& o)
 
 void pg_history_t::encode(ceph::buffer::list &bl) const
 {
-  ENCODE_START(9, 4, bl);
+  ENCODE_START(10, 4, bl);
   encode(epoch_created, bl);
   encode(last_epoch_started, bl);
   encode(last_epoch_clean, bl);
@@ -3126,12 +3275,13 @@ void pg_history_t::encode(ceph::buffer::list &bl) const
   encode(last_interval_started, bl);
   encode(last_interval_clean, bl);
   encode(epoch_pool_created, bl);
+  encode(prior_readable_until_ub, bl);
   ENCODE_FINISH(bl);
 }
 
 void pg_history_t::decode(ceph::buffer::list::const_iterator &bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(9, 4, 4, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(10, 4, 4, bl);
   decode(epoch_created, bl);
   decode(last_epoch_started, bl);
   if (struct_v >= 3)
@@ -3176,6 +3326,9 @@ void pg_history_t::decode(ceph::buffer::list::const_iterator &bl)
   } else {
     epoch_pool_created = epoch_created;
   }
+  if (struct_v >= 10) {
+    decode(prior_readable_until_ub, bl);
+  }
   DECODE_FINISH(bl);
 }
 
@@ -3197,6 +3350,9 @@ void pg_history_t::dump(Formatter *f) const
   f->dump_stream("last_deep_scrub") << last_deep_scrub;
   f->dump_stream("last_deep_scrub_stamp") << last_deep_scrub_stamp;
   f->dump_stream("last_clean_scrub_stamp") << last_clean_scrub_stamp;
+  f->dump_float(
+    "prior_readable_until_ub",
+    std::chrono::duration<double>(prior_readable_until_ub).count());
 }
 
 void pg_history_t::generate_test_instances(list<pg_history_t*>& o)
@@ -3210,6 +3366,7 @@ void pg_history_t::generate_test_instances(list<pg_history_t*>& o)
   o.back()->last_epoch_clean = 3;
   o.back()->last_interval_clean = 2;
   o.back()->last_epoch_split = 4;
+  o.back()->prior_readable_until_ub = make_timespan(3.1415);
   o.back()->same_up_since = 5;
   o.back()->same_interval_since = 6;
   o.back()->same_primary_since = 7;
@@ -3344,23 +3501,27 @@ void pg_info_t::generate_test_instances(list<pg_info_t*>& o)
 // -- pg_notify_t --
 void pg_notify_t::encode(ceph::buffer::list &bl) const
 {
-  ENCODE_START(2, 2, bl);
+  ENCODE_START(3, 2, bl);
   encode(query_epoch, bl);
   encode(epoch_sent, bl);
   encode(info, bl);
   encode(to, bl);
   encode(from, bl);
+  encode(past_intervals, bl);
   ENCODE_FINISH(bl);
 }
 
 void pg_notify_t::decode(ceph::buffer::list::const_iterator &bl)
 {
-  DECODE_START(2, bl);
+  DECODE_START(3, bl);
   decode(query_epoch, bl);
   decode(epoch_sent, bl);
   decode(info, bl);
   decode(to, bl);
   decode(from, bl);
+  if (struct_v >= 3) {
+    decode(past_intervals, bl);
+  }
   DECODE_FINISH(bl);
 }
 
@@ -3375,12 +3536,15 @@ void pg_notify_t::dump(Formatter *f) const
     info.dump(f);
     f->close_section();
   }
+  f->dump_object("past_intervals", past_intervals);
 }
 
 void pg_notify_t::generate_test_instances(list<pg_notify_t*>& o)
 {
-  o.push_back(new pg_notify_t(shard_id_t(3), shard_id_t::NO_SHARD, 1, 1, pg_info_t()));
-  o.push_back(new pg_notify_t(shard_id_t(0), shard_id_t(0), 3, 10, pg_info_t()));
+  o.push_back(new pg_notify_t(shard_id_t(3), shard_id_t::NO_SHARD, 1, 1,
+			      pg_info_t(), PastIntervals()));
+  o.push_back(new pg_notify_t(shard_id_t(0), shard_id_t(0), 3, 10,
+			      pg_info_t(), PastIntervals()));
 }
 
 ostream &operator<<(ostream &lhs, const pg_notify_t &notify)
@@ -3392,6 +3556,7 @@ ostream &operator<<(ostream &lhs, const pg_notify_t &notify)
       notify.to != shard_id_t::NO_SHARD)
     lhs << " " << (unsigned)notify.from
 	<< "->" << (unsigned)notify.to;
+  lhs << " " << notify.past_intervals;
   return lhs << ")";
 }
 
@@ -3553,7 +3718,7 @@ public:
   pair<epoch_t, epoch_t> get_bounds() const override {
     return make_pair(first, last + 1);
   }
-  void adjust_start_backwards(epoch_t last_epoch_clean) {
+  void adjust_start_backwards(epoch_t last_epoch_clean) override {
     first = last_epoch_clean;
   }
 
@@ -4097,6 +4262,71 @@ void pg_query_t::generate_test_instances(list<pg_query_t*>& o)
 			     *h.back(), 5));
 }
 
+// -- pg_lease_t --
+
+void pg_lease_t::encode(bufferlist& bl) const
+{
+  ENCODE_START(1, 1, bl);
+  encode(readable_until, bl);
+  encode(readable_until_ub, bl);
+  encode(interval, bl);
+  ENCODE_FINISH(bl);
+}
+
+void pg_lease_t::decode(bufferlist::const_iterator& p)
+{
+  DECODE_START(1, p);
+  decode(readable_until, p);
+  decode(readable_until_ub, p);
+  decode(interval, p);
+  DECODE_FINISH(p);
+}
+
+void pg_lease_t::dump(Formatter *f) const
+{
+  f->dump_stream("readable_until") << readable_until;
+  f->dump_stream("readable_until_ub") << readable_until_ub;
+  f->dump_stream("interval") << interval;
+}
+
+void pg_lease_t::generate_test_instances(std::list<pg_lease_t*>& o)
+{
+  o.push_back(new pg_lease_t());
+  o.push_back(new pg_lease_t());
+  o.back()->readable_until = make_timespan(1.5);
+  o.back()->readable_until_ub = make_timespan(3.4);
+  o.back()->interval = make_timespan(1.0);
+}
+
+// -- pg_lease_ack_t --
+
+void pg_lease_ack_t::encode(bufferlist& bl) const
+{
+  ENCODE_START(1, 1, bl);
+  encode(readable_until_ub, bl);
+  ENCODE_FINISH(bl);
+}
+
+void pg_lease_ack_t::decode(bufferlist::const_iterator& p)
+{
+  DECODE_START(1, p);
+  decode(readable_until_ub, p);
+  DECODE_FINISH(p);
+}
+
+void pg_lease_ack_t::dump(Formatter *f) const
+{
+  f->dump_stream("readable_until_ub") << readable_until_ub;
+}
+
+void pg_lease_ack_t::generate_test_instances(std::list<pg_lease_ack_t*>& o)
+{
+  o.push_back(new pg_lease_ack_t());
+  o.push_back(new pg_lease_ack_t());
+  o.back()->readable_until_ub = make_timespan(3.4);
+}
+
+
 // -- ObjectModDesc --
 void ObjectModDesc::visit(Visitor *visitor) const
 {
@@ -4268,9 +4498,9 @@ void ObjectModDesc::decode(ceph::buffer::list::const_iterator &_bl)
   DECODE_FINISH(_bl);
 }
 
-std::atomic<int32_t> ObjectCleanRegions::max_num_intervals = {10};
+std::atomic<uint32_t> ObjectCleanRegions::max_num_intervals = {10};
 
-void ObjectCleanRegions::set_max_num_intervals(int32_t num)
+void ObjectCleanRegions::set_max_num_intervals(uint32_t num)
 {
   max_num_intervals = num;
 }
@@ -4384,7 +4614,7 @@ ostream& operator<<(ostream& out, const ObjectCleanRegions& ocr)
 {
   return out << "clean_offsets: " << ocr.clean_offsets
              << ", clean_omap: " << ocr.clean_omap
-             << ", object_new: " << ocr.new_object;
+             << ", new_object: " << ocr.new_object;
 }
 
 // -- pg_log_entry_t --
@@ -4419,7 +4649,7 @@ void pg_log_entry_t::decode_with_checksum(ceph::buffer::list::const_iterator& p)
 
 void pg_log_entry_t::encode(ceph::buffer::list &bl) const
 {
-  ENCODE_START(13, 4, bl);
+  ENCODE_START(14, 4, bl);
   encode(op, bl);
   encode(soid, bl);
   encode(version, bl);
@@ -4449,12 +4679,15 @@ void pg_log_entry_t::encode(ceph::buffer::list &bl) const
   if (!extra_reqids.empty())
     encode(extra_reqid_return_codes, bl);
   encode(clean_regions, bl);
+  if (op != ERROR)
+    encode(return_code, bl);
+  encode(op_returns, bl);
   ENCODE_FINISH(bl);
 }
 
 void pg_log_entry_t::decode(ceph::buffer::list::const_iterator &bl)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(12, 4, 4, bl);
+  DECODE_START_LEGACY_COMPAT_LEN(14, 4, 4, bl);
   decode(op, bl);
   if (struct_v < 2) {
     sobject_t old_soid;
@@ -4511,9 +4744,15 @@ void pg_log_entry_t::decode(ceph::buffer::list::const_iterator &bl)
   if (struct_v >= 12 && !extra_reqids.empty())
     decode(extra_reqid_return_codes, bl);
   if (struct_v >= 13)
-    ::decode(clean_regions, bl);
+    decode(clean_regions, bl);
   else
     clean_regions.mark_fully_dirty();
+  if (struct_v >= 14) {
+    if (op != ERROR) {
+      decode(return_code, bl);
+    }
+    decode(op_returns, bl);
+  }
   DECODE_FINISH(bl);
 }
 
@@ -4541,6 +4780,13 @@ void pg_log_entry_t::dump(Formatter *f) const
   f->close_section();
   f->dump_stream("mtime") << mtime;
   f->dump_int("return_code", return_code);
+  if (!op_returns.empty()) {
+    f->open_array_section("op_returns");
+    for (auto& i : op_returns) {
+      f->dump_object("op", i);
+    }
+    f->close_section();
+  }
   if (snaps.length() > 0) {
     vector<snapid_t> v;
     ceph::buffer::list c = snaps;
@@ -4586,6 +4832,9 @@ ostream& operator<<(ostream& out, const pg_log_entry_t& e)
       << std::left << std::setw(8) << e.get_op_name() << ' '
       << e.soid << " by " << e.reqid << " " << e.mtime
       << " " << e.return_code;
+  if (!e.op_returns.empty()) {
+    out << " " << e.op_returns;
+  }
   if (e.snaps.length()) {
     vector<snapid_t> snaps;
     ceph::buffer::list c = e.snaps;
@@ -4615,21 +4864,25 @@ std::string pg_log_dup_t::get_key_name() const
 
 void pg_log_dup_t::encode(ceph::buffer::list &bl) const
 {
-  ENCODE_START(1, 1, bl);
+  ENCODE_START(2, 1, bl);
   encode(reqid, bl);
   encode(version, bl);
   encode(user_version, bl);
   encode(return_code, bl);
+  encode(op_returns, bl);
   ENCODE_FINISH(bl);
 }
 
 void pg_log_dup_t::decode(ceph::buffer::list::const_iterator &bl)
 {
-  DECODE_START(1, bl);
+  DECODE_START(2, bl);
   decode(reqid, bl);
   decode(version, bl);
   decode(user_version, bl);
   decode(return_code, bl);
+  if (struct_v >= 2) {
+    decode(op_returns, bl);
+  }
   DECODE_FINISH(bl);
 }
 
@@ -4639,6 +4892,13 @@ void pg_log_dup_t::dump(Formatter *f) const
   f->dump_stream("version") << version;
   f->dump_stream("user_version") << user_version;
   f->dump_stream("return_code") << return_code;
+  if (!op_returns.empty()) {
+    f->open_array_section("op_returns");
+    for (auto& i : op_returns) {
+      f->dump_object("op", i);
+    }
+    f->close_section();
+  }
 }
 
 void pg_log_dup_t::generate_test_instances(list<pg_log_dup_t*>& o)
@@ -4656,9 +4916,13 @@ void pg_log_dup_t::generate_test_instances(list<pg_log_dup_t*>& o)
 
 
 std::ostream& operator<<(std::ostream& out, const pg_log_dup_t& e) {
-  return out << "log_dup(reqid=" << e.reqid <<
+  out << "log_dup(reqid=" << e.reqid <<
     " v=" << e.version << " uv=" << e.user_version <<
-    " rc=" << e.return_code << ")";
+    " rc=" << e.return_code;
+  if (!e.op_returns.empty()) {
+    out << " " << e.op_returns;
+  }
+  return out << ")";
 }
 
 
@@ -4942,7 +5206,7 @@ void object_copy_data_t::encode(ceph::buffer::list& bl, uint64_t features) const
 
 void object_copy_data_t::decode(ceph::buffer::list::const_iterator& bl)
 {
-  DECODE_START(7, bl);
+  DECODE_START(8, bl);
   if (struct_v < 5) {
     // old
     decode(size, bl);
@@ -5322,7 +5586,7 @@ void SnapSet::decode(ceph::buffer::list::const_iterator& bl)
 {
   DECODE_START_LEGACY_COMPAT_LEN(3, 2, 2, bl);
   decode(seq, bl);
-  bl.advance(1u);  // skip legacy head_exists (always true)
+  bl += 1u;  // skip legacy head_exists (always true)
   decode(snaps, bl);
   decode(clones, bl);
   decode(clone_overlap, bl);
@@ -5546,6 +5810,30 @@ void chunk_info_t::dump(Formatter *f) const
   f->dump_unsigned("flags", flags);
 }
 
+
+bool chunk_info_t::operator==(const chunk_info_t& cit) const
+{
+  if (has_fingerprint()) {
+    if (oid.oid.name == cit.oid.oid.name) {
+      return true;
+    }
+  } else {
+    if (offset == cit.offset && length == cit.length &&
+	oid.oid.name == cit.oid.oid.name) {
+      return true;
+    }
+
+  }
+  return false;
+}
+
+bool operator==(const std::pair<const long unsigned int, chunk_info_t> & l,
+		const std::pair<const long unsigned int, chunk_info_t> & r) 
+{
+  return l.first == r.first &&
+	 l.second == r.second;
+}
+
 ostream& operator<<(ostream& out, const chunk_info_t& ci)
 {
   return out << "(len: " << ci.length << " oid: " << ci.oid
@@ -5554,6 +5842,90 @@ ostream& operator<<(ostream& out, const chunk_info_t& ci)
 }
 
 // -- object_manifest_t --
+
+std::ostream& operator<<(std::ostream& out, const object_ref_delta_t & ci)
+{
+  return out << ci.ref_delta << std::endl;
+}
+
+void object_manifest_t::calc_refs_to_drop_on_removal(
+  const object_manifest_t* _g,
+  const object_manifest_t* _l,
+  object_ref_delta_t &refs) const
+{
+  /* At a high level, the rule is that consecutive clones with the same reference
+   * at the same offset share a reference.  As such, removing *this may result
+   * in removing references in two cases:
+   * 1) *this has a reference which it shares with neither _g nor _l
+   * 2) _g and _l have a reference which they share with each other but not
+   *   *this.
+   *
+   * For a particular offset, both 1 and 2 can happen.
+   *
+   * Notably, this means that to evaluate the reference change from removing
+   * the object with *this, we only need to look at the two adjacent clones.
+   */
+
+  // Paper over possibly missing _g or _l -- nullopt is semantically the same
+  // as an empty chunk_map
+  static const object_manifest_t empty;
+  const object_manifest_t &g = _g ? *_g : empty;
+  const object_manifest_t &l = _l ? *_l : empty;
+
+  auto giter = g.chunk_map.begin();
+  auto iter = chunk_map.begin();
+  auto liter = l.chunk_map.begin();
+
+  // Translate iter, map pair to the current offset, end() -> max
+  auto get_offset = [](decltype(iter) &i, const object_manifest_t &manifest)
+    -> uint64_t {
+    return i == manifest.chunk_map.end() ?
+      std::numeric_limits<uint64_t>::max() : i->first;
+  };
+
+  /* If current matches the offset at iter, returns the chunk at *iter
+   * and increments iter.  Otherwise, returns nullptr.
+   *
+   * current will always be derived from the min of *giter, *iter, and
+   * *liter on each cycle, so the result will be that each loop iteration
+   * will pick up all chunks at the offest being considered, each offset
+   * will be considered once, and all offsets will be considered.
+   */
+  auto get_chunk = [](
+    uint64_t current, decltype(iter) &i, const object_manifest_t &manifest)
+    -> const chunk_info_t * {
+    if (i == manifest.chunk_map.end() || current != i->first) {
+      return nullptr;
+    } else {
+      return &(i++)->second;
+    }
+  };
+
+  while (giter != g.chunk_map.end() ||
+	 iter != chunk_map.end() ||
+	 liter != l.chunk_map.end()) {
+    auto current = std::min(
+      std::min(get_offset(giter, g), get_offset(iter, *this)),
+      get_offset(liter, l));
+
+    auto gchunk = get_chunk(current, giter, g);
+    auto chunk = get_chunk(current, iter, *this);
+    auto lchunk = get_chunk(current, liter, l);
+
+    if (gchunk && lchunk && *gchunk == *lchunk &&
+	(!chunk || *gchunk != *chunk)) {
+      // case 1 from above: l and g match, chunk does not
+      refs.dec_ref(gchunk->oid);
+    }
+
+    if (chunk &&
+	(!gchunk || chunk->oid != gchunk->oid) &&
+	(!lchunk || chunk->oid != lchunk->oid)) {
+      // case 2 from above: *this matches neither
+      refs.dec_ref(chunk->oid);
+    }
+  }
+}
 
 void object_manifest_t::encode(ceph::buffer::list& bl) const
 {
@@ -6502,29 +6874,15 @@ ostream& operator<<(ostream& out, const OSDOp& op)
       break;
     }
   }
+  if (op.indata.length()) {
+    out << " in=" << op.indata.length() << "b";
+  }
+  if (op.outdata.length()) {
+    out << " out=" << op.outdata.length() << "b";
+  }
   return out;
 }
 
-
-void OSDOp::split_osd_op_vector_in_data(vector<OSDOp>& ops, ceph::buffer::list& in)
-{
-  ceph::buffer::list::iterator datap = in.begin();
-  for (unsigned i = 0; i < ops.size(); i++) {
-    if (ops[i].op.payload_len) {
-      datap.copy(ops[i].op.payload_len, ops[i].indata);
-    }
-  }
-}
-
-void OSDOp::merge_osd_op_vector_in_data(vector<OSDOp>& ops, ceph::buffer::list& out)
-{
-  for (unsigned i = 0; i < ops.size(); i++) {
-    if (ops[i].indata.length()) {
-      ops[i].op.payload_len = ops[i].indata.length();
-      out.append(ops[i].indata);
-    }
-  }
-}
 
 void OSDOp::split_osd_op_vector_out_data(vector<OSDOp>& ops, ceph::buffer::list& in)
 {
@@ -6539,38 +6897,9 @@ void OSDOp::split_osd_op_vector_out_data(vector<OSDOp>& ops, ceph::buffer::list&
 void OSDOp::merge_osd_op_vector_out_data(vector<OSDOp>& ops, ceph::buffer::list& out)
 {
   for (unsigned i = 0; i < ops.size(); i++) {
+    ops[i].op.payload_len = ops[i].outdata.length();
     if (ops[i].outdata.length()) {
-      ops[i].op.payload_len = ops[i].outdata.length();
       out.append(ops[i].outdata);
-    }
-  }
-}
-
-void OSDOp::clear_data(vector<OSDOp>& ops)
-{
-  for (unsigned i = 0; i < ops.size(); i++) {
-    OSDOp& op = ops[i];
-    op.outdata.clear();
-    if (ceph_osd_op_type_attr(op.op.op) &&
-        op.op.xattr.name_len &&
-	op.indata.length() >= op.op.xattr.name_len) {
-      ceph::buffer::ptr bp(op.op.xattr.name_len);
-      ceph::buffer::list bl;
-      bl.append(bp);
-      bl.copy_in(0, op.op.xattr.name_len, op.indata);
-      op.indata.claim(bl);
-    } else if (ceph_osd_op_type_exec(op.op.op) &&
-               op.op.cls.class_len &&
-	       op.indata.length() >
-	         (op.op.cls.class_len + op.op.cls.method_len)) {
-      __u8 len = op.op.cls.class_len + op.op.cls.method_len;
-      ceph::buffer::ptr bp(len);
-      ceph::buffer::list bl;
-      bl.append(bp);
-      bl.copy_in(0, len, op.indata);
-      op.indata.claim(bl);
-    } else {
-      op.indata.clear();
     }
   }
 }
@@ -6578,6 +6907,7 @@ void OSDOp::clear_data(vector<OSDOp>& ops)
 int prepare_info_keymap(
   CephContext* cct,
   map<string,bufferlist> *km,
+  string *key_to_remove,
   epoch_t epoch,
   pg_info_t &info,
   pg_info_t &last_written_info,
@@ -6623,6 +6953,10 @@ int prepare_info_keymap(
       }
       *_dout << dendl;
     }
+  } else if (info.last_update <= last_written_info.last_update) {
+    // clean up any potentially stale fastinfo key resulting from last_update
+    // not moving forwards (e.g., a backwards jump during peering)
+    *key_to_remove = fastinfo_key;
   }
 
   last_written_info = info;
@@ -6676,4 +7010,29 @@ void init_pg_ondisk(
   __u8 struct_v = pg_latest_struct_v;
   encode(struct_v, values[string(infover_key)]);
   t.omap_setkeys(coll, pgmeta_oid, values);
+}
+
+PGLSFilter::PGLSFilter() : cct(nullptr)
+{
+}
+
+PGLSFilter::~PGLSFilter()
+{
+}
+
+int PGLSPlainFilter::init(ceph::bufferlist::const_iterator &params)
+{
+  try {
+    decode(xattr, params);
+    decode(val, params);
+  } catch (ceph::buffer::error &e) {
+    return -EINVAL;
+  }
+  return 0;
+}
+
+bool PGLSPlainFilter::filter(const hobject_t& obj,
+                             const ceph::bufferlist& xattr_data) const
+{
+  return xattr_data.contents_equal(val.c_str(), val.size());
 }

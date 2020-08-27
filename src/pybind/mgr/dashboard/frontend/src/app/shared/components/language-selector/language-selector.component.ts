@@ -1,10 +1,9 @@
-import { Component, Input, OnInit } from '@angular/core';
+import { Component, OnInit } from '@angular/core';
 
-import { defineLocale } from 'ngx-bootstrap/chronos';
-import { BsLocaleService } from 'ngx-bootstrap/datepicker';
+import _ from 'lodash';
 
-import { LocaleHelper } from '../../../locale.helper';
-import { languageBootstrapMapping, SupportedLanguages } from './supported-languages.enum';
+import { LanguageService } from '../../services/language.service';
+import { SupportedLanguages } from './supported-languages.enum';
 
 @Component({
   selector: 'cd-language-selector',
@@ -12,35 +11,30 @@ import { languageBootstrapMapping, SupportedLanguages } from './supported-langua
   styleUrls: ['./language-selector.component.scss']
 })
 export class LanguageSelectorComponent implements OnInit {
-  @Input()
-  isDropdown = true;
-
-  supportedLanguages = SupportedLanguages;
+  allLanguages = SupportedLanguages;
+  supportedLanguages: Record<string, any> = {};
   selectedLanguage: string;
 
-  constructor(private localeService: BsLocaleService) {}
+  constructor(private languageService: LanguageService) {}
 
   ngOnInit() {
-    this.selectedLanguage = LocaleHelper.getLocale();
-    this.defineUsedLanguage();
+    this.selectedLanguage = this.languageService.getLocale();
+
+    this.languageService.getLanguages().subscribe((langs) => {
+      this.supportedLanguages = _.pick(SupportedLanguages, langs) as Object;
+    });
   }
 
   /**
-   * Sets ngx-bootstrap local based on the current language selection
-   *
-   * ngx-bootstrap locals documentation:
-   * https://valor-software.com/ngx-bootstrap/#/datepicker#locales
+   * Jest is being more restricted regarding spying on the reload method.
+   * This will allow us to spyOn this method instead.
    */
-  private defineUsedLanguage() {
-    const lang = this.selectedLanguage.slice(0, 2);
-    if (lang in languageBootstrapMapping) {
-      defineLocale(lang, languageBootstrapMapping[lang]);
-      this.localeService.use(lang);
-    }
+  reloadWindow() {
+    window.location.reload();
   }
 
   changeLanguage(lang: string) {
-    LocaleHelper.setLocale(lang);
-    window.location.reload();
+    this.languageService.setLocale(lang);
+    this.reloadWindow();
   }
 }

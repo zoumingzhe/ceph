@@ -2,20 +2,11 @@
  MDS Config Reference
 ======================
 
-``mon force standby active`` 
-
-:Description: If ``true`` monitors force standby-replay to be active. Set
-              under ``[mon]`` or ``[global]``.
-
-:Type: Boolean
-:Default: ``true`` 
-
 ``mds cache memory limit``
 
 :Description: The memory limit the MDS should enforce for its cache.
-              Administrators should use this instead of ``mds cache size``.
 :Type:  64-bit Integer Unsigned
-:Default: ``1073741824``
+:Default: ``4G``
 
 ``mds cache reservation``
 
@@ -26,14 +17,6 @@
 :Type:  Float
 :Default: ``0.05``
 
-``mds cache size``
-
-:Description: The number of inodes to cache. A value of 0 indicates an
-              unlimited number. It is recommended to use
-              ``mds_cache_memory_limit`` to limit the amount of memory the MDS
-              cache uses.
-:Type:  32-bit Integer
-:Default: ``0``
 
 ``mds cache mid``
 
@@ -86,14 +69,14 @@
 :Default: ``15``
 
 
-``mds blacklist interval``
+``mds blocklist interval``
 
-:Description: The blacklist duration for failed MDSs in the OSD map. Note,
+:Description: The blocklist duration for failed MDSs in the OSD map. Note,
               this controls how long failed MDS daemons will stay in the
-              OSDMap blacklist. It has no effect on how long something is
-              blacklisted when the administrator blacklists it manually. For
-              example, ``ceph osd blacklist add`` will still use the default
-              blacklist time.
+              OSDMap blocklist. It has no effect on how long something is
+              blocklisted when the administrator blocklists it manually. For
+              example, ``ceph osd blocklist add`` will still use the default
+              blocklist time.
 :Type:  Float
 :Default: ``24.0*60.0``
 
@@ -176,21 +159,7 @@
               we initiate trimming. Set to ``-1`` to disable limits.
 
 :Type:  32-bit Integer
-:Default: ``30``
-
-
-``mds log max expiring``
-
-:Description: The maximum number of segments to expire in parallels
-:Type:  32-bit Integer
-:Default: ``20``
-
-
-``mds log eopen size``
-
-:Description: The maximum number of inodes in an EOpen event.
-:Type:  32-bit Integer
-:Default: ``100``
+:Default: ``128``
 
 
 ``mds bal sample interval``
@@ -552,31 +521,6 @@
               
 :Type:  32-bit Integer
 :Default: ``0``
-
-
-``mds standby for name``
-
-:Description: An MDS daemon will standby for another MDS daemon of the name 
-              specified in this setting.
-
-:Type:  String
-:Default: N/A
-
-
-``mds standby for rank``
-
-:Description: An MDS daemon will standby for an MDS daemon of this rank. 
-:Type:  32-bit Integer
-:Default: ``-1``
-
-
-``mds standby replay``
-
-:Description: Determines whether a ``ceph-mds`` daemon should poll and replay 
-              the log of an active MDS (hot standby).
-              
-:Type:  Boolean
-:Default:  ``false``
 
 
 ``mds min caps per client``

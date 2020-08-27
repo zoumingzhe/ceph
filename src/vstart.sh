@@ -5,6 +5,32 @@
 # abort on failure
 set -e
 
+quoted_print() {
+    for s in "$@"; do
+        if [[ "$s" =~ \  ]]; then
+            printf -- "'%s' " "$s"
+        else
+            printf -- "$s "
+        fi
+    done
+    printf '\n'
+}
+
+debug() {
+  "$@" >&2
+}
+
+prunb() {
+    debug quoted_print "$@" '&'
+    "$@" &
+}
+
+prun() {
+    debug quoted_print "$@"
+    "$@"
+}
+
+
 if [ -n "$VSTART_DEST" ]; then
     SRC_PATH=`dirname $0`
     SRC_PATH=`(cd $SRC_PATH; pwd)`
@@ -21,7 +47,7 @@ fi
 
 get_cmake_variable() {
     local variable=$1
-    grep "$variable" CMakeCache.txt | cut -d "=" -f 2
+    grep "${variable}:" CMakeCache.txt | cut -d "=" -f 2
 }
 
 # for running out of the CMake build directory
@@ -30,19 +56,9 @@ if [ -e CMakeCache.txt ]; then
     CEPH_ROOT=$(get_cmake_variable ceph_SOURCE_DIR)
     CEPH_BUILD_DIR=`pwd`
     [ -z "$MGR_PYTHON_PATH" ] && MGR_PYTHON_PATH=$CEPH_ROOT/src/pybind/mgr
-    CEPH_MGR_PY_VERSION_MAJOR=$(get_cmake_variable MGR_PYTHON_VERSION | cut -d '.' -f 1)
-    if [ -n "$CEPH_MGR_PY_VERSION_MAJOR" ]; then
-        CEPH_PY_VERSION_MAJOR=${CEPH_MGR_PY_VERSION_MAJOR}
-    else
-        if [ $(get_cmake_variable WITH_PYTHON2) = ON ]; then
-            CEPH_PY_VERSION_MAJOR=2
-        else
-            CEPH_PY_VERSION_MAJOR=3
-        fi
-    fi
 fi
 
-# use CEPH_BUILD_ROOT to vstart from a 'make install' 
+# use CEPH_BUILD_ROOT to vstart from a 'make install'
 if [ -n "$CEPH_BUILD_ROOT" ]; then
     [ -z "$CEPH_BIN" ] && CEPH_BIN=$CEPH_BUILD_ROOT/bin
     [ -z "$CEPH_LIB" ] && CEPH_LIB=$CEPH_BUILD_ROOT/lib
@@ -58,6 +74,7 @@ elif [ -n "$CEPH_ROOT" ]; then
     [ -z "$CEPH_LIB" ] && CEPH_LIB=$CEPH_BUILD_DIR/lib
     [ -z "$OBJCLASS_PATH" ] && OBJCLASS_PATH=$CEPH_LIB
     [ -z "$EC_PATH" ] && EC_PATH=$CEPH_LIB
+    [ -z "$CEPH_PYTHON_COMMON" ] && CEPH_PYTHON_COMMON=$CEPH_ROOT/src/python-common
 fi
 
 if [ -z "${CEPH_VSTART_WRAPPER}" ]; then
@@ -66,11 +83,14 @@ fi
 
 [ -z "$PYBIND" ] && PYBIND=./pybind
 
-export PYTHONPATH=$PYBIND:$CEPH_LIB/cython_modules/lib.${CEPH_PY_VERSION_MAJOR}:$PYTHONPATH
+[ -n "$CEPH_PYTHON_COMMON" ] && CEPH_PYTHON_COMMON="$CEPH_PYTHON_COMMON:"
+CYTHON_PYTHONPATH="$CEPH_LIB/cython_modules/lib.3"
+export PYTHONPATH=$PYBIND:$CYTHON_PYTHONPATH:$CEPH_PYTHON_COMMON$PYTHONPATH
+
 export LD_LIBRARY_PATH=$CEPH_LIB:$LD_LIBRARY_PATH
 export DYLD_LIBRARY_PATH=$CEPH_LIB:$DYLD_LIBRARY_PATH
 # Suppress logging for regular use that indicated that we are using a
-# development version. vstart.sh is only used during testing and 
+# development version. vstart.sh is only used during testing and
 # development
 export CEPH_DEV=1
 
@@ -80,13 +100,15 @@ export CEPH_DEV=1
 [ -z "$CEPH_NUM_MGR" ] && CEPH_NUM_MGR="$MGR"
 [ -z "$CEPH_NUM_FS"  ] && CEPH_NUM_FS="$FS"
 [ -z "$CEPH_NUM_RGW" ] && CEPH_NUM_RGW="$RGW"
+[ -z "$GANESHA_DAEMON_NUM" ] && GANESHA_DAEMON_NUM="$NFS"
 
 # if none of the CEPH_NUM_* number is specified, kill the existing
 # cluster.
 if [ -z "$CEPH_NUM_MON" -a \
      -z "$CEPH_NUM_OSD" -a \
      -z "$CEPH_NUM_MDS" -a \
-     -z "$CEPH_NUM_MGR" ]; then
+     -z "$CEPH_NUM_MGR" -a \
+     -z "$GANESHA_DAEMON_NUM" ]; then
     kill_all=1
 else
     kill_all=0
@@ -99,6 +121,7 @@ fi
 [ -z "$CEPH_NUM_FS"  ] && CEPH_NUM_FS=1
 [ -z "$CEPH_MAX_MDS" ] && CEPH_MAX_MDS=1
 [ -z "$CEPH_NUM_RGW" ] && CEPH_NUM_RGW=0
+[ -z "$GANESHA_DAEMON_NUM" ] && GANESHA_DAEMON_NUM=0
 
 [ -z "$CEPH_DIR" ] && CEPH_DIR="$PWD"
 [ -z "$CEPH_DEV_DIR" ] && CEPH_DEV_DIR="$CEPH_DIR/dev"
@@ -122,8 +145,10 @@ redirect=0
 smallmds=0
 short=0
 ec=0
+cephadm=0
+parallel=true
 hitset=""
-overwrite_conf=1
+overwrite_conf=0
 cephx=1 #turn cephx on by default
 gssapi_authx=0
 cache=""
@@ -137,12 +162,12 @@ rgw_frontend="beast"
 rgw_compression=""
 lockdep=${LOCKDEP:-1}
 spdk_enabled=0 #disable SPDK by default
-pci_id=""
+zoned_enabled=0
 
 with_mgr_dashboard=true
 if [[ "$(get_cmake_variable WITH_MGR_DASHBOARD_FRONTEND)" != "ON" ]] ||
    [[ "$(get_cmake_variable WITH_RBD)" != "ON" ]]; then
-    echo "ceph-mgr dashboard not built - disabling."
+    debug echo "ceph-mgr dashboard not built - disabling."
     with_mgr_dashboard=false
 fi
 
@@ -160,23 +185,23 @@ conf_fn="$CEPH_CONF_PATH/ceph.conf"
 keyring_fn="$CEPH_CONF_PATH/keyring"
 osdmap_fn="/tmp/ceph_osdmap.$$"
 monmap_fn="/tmp/ceph_monmap.$$"
+inc_osd_num=0
 
 msgr="21"
 
-usage="usage: $0 [option]... \nex: MON=3 OSD=1 MDS=1 MGR=1 RGW=1 $0 -n -d\n"
+usage="usage: $0 [option]... \nex: MON=3 OSD=1 MDS=1 MGR=1 RGW=1 NFS=1 $0 -n -d\n"
 usage=$usage"options:\n"
 usage=$usage"\t-d, --debug\n"
 usage=$usage"\t-s, --standby_mds: Generate standby-replay MDS for each active\n"
 usage=$usage"\t-l, --localhost: use localhost instead of hostname\n"
 usage=$usage"\t-i <ip>: bind to specific ip\n"
 usage=$usage"\t-n, --new\n"
-usage=$usage"\t-N, --not-new: reuse existing cluster config (default)\n"
 usage=$usage"\t--valgrind[_{osd,mds,mon,rgw}] 'toolname args...'\n"
 usage=$usage"\t--nodaemon: use ceph-run as wrapper for mon/osd/mds\n"
 usage=$usage"\t--redirect-output: only useful with nodaemon, directs output to log file\n"
-usage=$usage"\t--smallmds: limit mds cache size\n"
+usage=$usage"\t--smallmds: limit mds cache memory limit\n"
 usage=$usage"\t-m ip:port\t\tspecify monitor address\n"
-usage=$usage"\t-k keep old configuration files\n"
+usage=$usage"\t-k keep old configuration files (default)\n"
 usage=$usage"\t-x enable cephx (on by default)\n"
 usage=$usage"\t-X disable cephx\n"
 usage=$usage"\t-g --gssapi enable Kerberos/GSSApi authentication\n"
@@ -196,13 +221,17 @@ usage=$usage"\t--short: short object names only; necessary for ext4 dev\n"
 usage=$usage"\t--nolockdep disable lockdep\n"
 usage=$usage"\t--multimds <count> allow multimds with maximum active count\n"
 usage=$usage"\t--without-dashboard: do not run using mgr dashboard\n"
-usage=$usage"\t--bluestore-spdk <vendor>:<device>: enable SPDK and specify the PCI-ID of the NVME device\n"
+usage=$usage"\t--bluestore-spdk: enable SPDK and with a comma-delimited list of PCI-IDs of NVME device (e.g, 0000:81:00.0)\n"
 usage=$usage"\t--msgr1: use msgr1 only\n"
 usage=$usage"\t--msgr2: use msgr2 only\n"
 usage=$usage"\t--msgr21: use msgr2 and msgr1\n"
 usage=$usage"\t--crimson: use crimson-osd instead of ceph-osd\n"
 usage=$usage"\t--osd-args: specify any extra osd specific options\n"
 usage=$usage"\t--bluestore-devs: comma-separated list of blockdevs to use for bluestore\n"
+usage=$usage"\t--bluestore-zoned: blockdevs listed by --bluestore-devs are zoned devices (HM-SMR HDD or ZNS SSD)\n"
+usage=$usage"\t--inc-osd: append some more osds into existing vcluster\n"
+usage=$usage"\t--cephadm: enable cephadm orchestrator with ~/.ssh/id_rsa[.pub]\n"
+usage=$usage"\t--no-parallel: dont start all OSDs in parallel\n"
 
 usage_exit() {
     printf "$usage"
@@ -231,9 +260,16 @@ case $1 in
     --new | -n )
         new=1
         ;;
-    --not-new | -N )
-	new=0
-	;;
+    --inc-osd )
+        new=0
+        kill_all=0
+        inc_osd_num=$2
+        if [ "$inc_osd_num" == "" ]; then
+            inc_osd_num=1
+        else
+            shift
+        fi
+        ;;
     --short )
         short=1
         ;;
@@ -252,6 +288,12 @@ case $1 in
         ;;
     --msgr21 )
         msgr="21"
+        ;;
+    --cephadm )
+        cephadm=1
+        ;;
+    --no-parallel )
+        parallel=false
         ;;
     --valgrind )
         [ -z "$2" ] && usage_exit
@@ -340,7 +382,7 @@ case $1 in
             echo "cannot use old configuration: $conf_fn not readable." >&2
             exit
         fi
-        overwrite_conf=0
+        new=0
         ;;
     --memstore )
         objectstore="memstore"
@@ -384,7 +426,7 @@ case $1 in
         ;;
     --bluestore-spdk )
         [ -z "$2" ] && usage_exit
-        pci_id="$2"
+        IFS=',' read -r -a bluestore_spdk_dev <<< "$2"
         spdk_enabled=1
         shift
         ;;
@@ -398,6 +440,9 @@ case $1 in
         done
         shift
         ;;
+    --bluestore-zoned )
+        zoned_enabled=1
+        ;;
     * )
         usage_exit
 esac
@@ -408,8 +453,10 @@ if [ $kill_all -eq 1 ]; then
     $SUDO $INIT_CEPH stop
 fi
 
-if [ "$overwrite_conf" -eq 0 ]; then
-    CEPH_ASOK_DIR=`dirname $($CEPH_BIN/ceph-conf  -c $conf_fn --show-config-value admin_socket)`
+if [ "$new" -eq 0 ]; then
+    if [ -z "$CEPH_ASOK_DIR" ]; then
+        CEPH_ASOK_DIR=`dirname $($CEPH_BIN/ceph-conf  -c $conf_fn --show-config-value admin_socket)`
+    fi
     mkdir -p $CEPH_ASOK_DIR
     MON=`$CEPH_BIN/ceph-conf -c $conf_fn --name $VSTART_SEC --lookup num_mon 2>/dev/null` && \
         CEPH_NUM_MON="$MON"
@@ -421,50 +468,23 @@ if [ "$overwrite_conf" -eq 0 ]; then
         CEPH_NUM_MGR="$MGR"
     RGW=`$CEPH_BIN/ceph-conf -c $conf_fn --name $VSTART_SEC --lookup num_rgw 2>/dev/null` && \
         CEPH_NUM_RGW="$RGW"
+    NFS=`$CEPH_BIN/ceph-conf -c $conf_fn --name $VSTART_SEC --lookup num_ganesha 2>/dev/null` && \
+        GANESHA_DAEMON_NUM="$NFS"
 else
-    if [ "$new" -ne 0 ]; then
-        # only delete if -n
-        if [ -e "$conf_fn" ]; then
-            asok_dir=`dirname $($CEPH_BIN/ceph-conf  -c $conf_fn --show-config-value admin_socket)`
-            rm -- "$conf_fn"
-            if [ $asok_dir != /var/run/ceph ]; then
-                [ -d $asok_dir ] && rm -f $asok_dir/* && rmdir $asok_dir
-            fi
+    # only delete if -n
+    if [ -e "$conf_fn" ]; then
+        asok_dir=`dirname $($CEPH_BIN/ceph-conf  -c $conf_fn --show-config-value admin_socket)`
+        rm -- "$conf_fn"
+        if [ $asok_dir != /var/run/ceph ]; then
+            [ -d $asok_dir ] && rm -f $asok_dir/* && rmdir $asok_dir
         fi
-        if [ -z "$CEPH_ASOK_DIR" ]; then
-            CEPH_ASOK_DIR=`mktemp -u -d "${TMPDIR:-/tmp}/ceph-asok.XXXXXX"`
-        fi
-    else
-        if [ -z "$CEPH_ASOK_DIR" ]; then
-            CEPH_ASOK_DIR=`dirname $($CEPH_BIN/ceph-conf -c $conf_fn --show-config-value admin_socket)`
-        fi
-        # -k is implied... (doesn't make sense otherwise)
-        overwrite_conf=0
+    fi
+    if [ -z "$CEPH_ASOK_DIR" ]; then
+        CEPH_ASOK_DIR=`mktemp -u -d "${TMPDIR:-/tmp}/ceph-asok.XXXXXX"`
     fi
 fi
 
 ARGS="-c $conf_fn"
-
-quoted_print() {
-    for s in "$@"; do
-        if [[ "$s" =~ \  ]]; then
-            printf -- "'%s' " "$s"
-        else
-            printf -- "$s "
-        fi
-    done
-    printf '\n'
-}
-
-prunb() {
-    quoted_print "$@" '&'
-    "$@" &
-}
-
-prun() {
-    quoted_print "$@"
-    "$@"
-}
 
 run() {
     type=$1
@@ -489,18 +509,30 @@ run() {
 }
 
 wconf() {
-    if [ "$overwrite_conf" -eq 1 ]; then
+    if [ "$new" -eq 1 -o "$overwrite_conf" -eq 1 ]; then
         cat >> "$conf_fn"
     fi
 }
 
-get_pci_selector() {
-    which_pci=$1
-    lspci -mm -n -D -d $pci_id | cut -d ' ' -f 1 | sed -n $which_pci'p'
-}
 
-get_pci_selector_num() {
-    lspci -mm -n -D -d $pci_id | cut -d' ' -f 1 | wc -l
+do_rgw_conf() {
+
+    if [ $CEPH_NUM_RGW -eq 0 ]; then
+        return 0
+    fi
+
+    # setup each rgw on a sequential port, starting at $CEPH_RGW_PORT.
+    # individual rgw's ids will be their ports.
+    current_port=$CEPH_RGW_PORT
+    for n in $(seq 1 $CEPH_NUM_RGW); do
+        wconf << EOF
+[client.rgw.${current_port}]
+        rgw frontends = $rgw_frontend port=${current_port}
+        admin socket = ${CEPH_OUT_DIR}/radosgw.${current_port}.asok
+EOF
+        current_port=$((current_port + 1))
+done
+
 }
 
 prepare_conf() {
@@ -545,6 +577,7 @@ prepare_conf() {
         num mds = $CEPH_NUM_MDS
         num mgr = $CEPH_NUM_MGR
         num rgw = $CEPH_NUM_RGW
+        num ganesha = $GANESHA_DAEMON_NUM
 
 [global]
         fsid = $(uuidgen)
@@ -552,6 +585,7 @@ prepare_conf() {
         mon osd full ratio = .99
         mon osd nearfull ratio = .99
         mon osd backfillfull ratio = .99
+        mon_max_pg_per_osd = ${MON_MAX_PG_PER_OSD:-1000}
         erasure code dir = $EC_PATH
         plugin dir = $CEPH_LIB
         filestore fd cache size = 32
@@ -594,14 +628,6 @@ EOF
     fi
     if [ "$objectstore" == "bluestore" ]; then
         if [ "$spdk_enabled" -eq 1 ]; then
-            if [ "$(get_pci_selector_num)" -eq 0 ]; then
-                echo "Not find the specified NVME device, please check." >&2
-                exit
-            fi
-            if [ $(get_pci_selector_num) -lt $CEPH_NUM_OSD ]; then
-                echo "OSD number ($CEPH_NUM_OSD) is greater than NVME SSD number ($(get_pci_selector_num)), please check." >&2
-                exit
-            fi
             BLUESTORE_OPTS="        bluestore_block_db_path = \"\"
         bluestore_block_db_size = 0
         bluestore_block_db_create = false
@@ -617,22 +643,33 @@ EOF
         bluestore block wal size = 1048576000
         bluestore block wal create = true"
         fi
+        if [ "$zoned_enabled" -eq 1 ]; then
+            BLUESTORE_OPTS="${BLUESTORE_OPTS}
+        bluestore min alloc size = 65536
+        bluestore prefer deferred size = 0
+        bluestore prefer deferred size hdd = 0
+        bluestore prefer deferred size ssd = 0
+        bluestore allocator = zoned"
+        fi
     fi
     wconf <<EOF
 [client]
         keyring = $keyring_fn
         log file = $CEPH_OUT_DIR/\$name.\$pid.log
         admin socket = $CEPH_ASOK_DIR/\$name.\$pid.asok
-$extra_conf
-[client.rgw]
-        rgw frontends = $rgw_frontend port=$CEPH_RGW_PORT
-        admin socket = ${CEPH_OUT_DIR}/radosgw.${CEPH_RGW_PORT}.asok
+
         ; needed for s3tests
+        rgw crypt s3 kms backend = testing
         rgw crypt s3 kms encryption keys = testkey-1=YmluCmJvb3N0CmJvb3N0LWJ1aWxkCmNlcGguY29uZgo= testkey-2=aWIKTWFrZWZpbGUKbWFuCm91dApzcmMKVGVzdGluZwo=
         rgw crypt require ssl = false
         ; uncomment the following to set LC days as the value in seconds;
         ; needed for passing lc time based s3-tests (can be verbose)
         ; rgw lc debug interval = 10
+
+$extra_conf
+EOF
+	do_rgw_conf
+	wconf << EOF
 [mds]
 $DAEMONOPTS
         mds data = $CEPH_DEV_DIR/mds.\$id
@@ -642,6 +679,7 @@ $extra_conf
 [mgr]
         mgr data = $CEPH_DEV_DIR/mgr.\$id
         mgr module path = $MGR_PYTHON_PATH
+        cephadm path = $CEPH_ROOT/src/cephadm/cephadm
 $DAEMONOPTS
 $extra_conf
 [osd]
@@ -654,6 +692,7 @@ $DAEMONOPTS
         osd class dir = $OBJCLASS_PATH
         osd class load list = *
         osd class default list = *
+        osd fast shutdown = false
 
         filestore wbthrottle xfs ios start flusher = 10
         filestore wbthrottle xfs ios hard limit = 20
@@ -711,18 +750,6 @@ start_mon() {
              --cap mgr 'allow *' \
              "$keyring_fn"
 
-        prun $SUDO "$CEPH_BIN/ceph-authtool" --gen-key --name=client.fs\
-             --cap mon 'allow r' \
-             --cap osd 'allow rw tag cephfs data=*' \
-             --cap mds 'allow rwp' \
-             "$keyring_fn"
-
-        prun $SUDO "$CEPH_BIN/ceph-authtool" --gen-key --name=client.rgw \
-             --cap mon 'allow rw' \
-             --cap osd 'allow rwx' \
-             --cap mgr 'allow rw' \
-             "$keyring_fn"
-
         # build a fresh fs monmap, mon fs
         local params=()
         local count=0
@@ -771,16 +798,34 @@ EOF
 }
 
 start_osd() {
-    for osd in `seq 0 $(($CEPH_NUM_OSD-1))`
+    if [ $inc_osd_num -gt 0 ]; then
+        old_maxosd=$($CEPH_BIN/ceph osd getmaxosd | sed -e 's/max_osd = //' -e 's/ in epoch.*//')
+        start=$old_maxosd
+        end=$(($start-1+$inc_osd_num))
+        overwrite_conf=1 # fake wconf
+    else
+        start=0
+        end=$(($CEPH_NUM_OSD-1))
+    fi
+    local osds_wait
+    for osd in `seq $start $end`
     do
-	if [ "$new" -eq 1 ]; then
+	local extra_seastar_args
+	if [ "$ceph_osd" == "crimson-osd" ]; then
+	    # designate a single CPU node $osd for osd.$osd
+	    extra_seastar_args="--smp 1 --cpuset $osd"
+	    if [ "$debug" -ne 0 ]; then
+		extra_seastar_args+=" --debug"
+	    fi
+	fi
+	if [ "$new" -eq 1 -o $inc_osd_num -gt 0 ]; then
             wconf <<EOF
 [osd.$osd]
         host = $HOSTNAME
 EOF
             if [ "$spdk_enabled" -eq 1 ]; then
                 wconf <<EOF
-        bluestore_block_path = spdk:$(get_pci_selector $((osd+1)))
+        bluestore_block_path = spdk:${bluestore_spdk_dev[$osd]}
 EOF
             fi
 
@@ -809,7 +854,7 @@ EOF
             echo "{\"cephx_secret\": \"$OSD_SECRET\"}" > $CEPH_DEV_DIR/osd$osd/new.json
             ceph_adm osd new $uuid -i $CEPH_DEV_DIR/osd$osd/new.json
             rm $CEPH_DEV_DIR/osd$osd/new.json
-            $SUDO $CEPH_BIN/$ceph_osd $extra_osd_args -i $osd $ARGS --mkfs --key $OSD_SECRET --osd-uuid $uuid
+            $SUDO $CEPH_BIN/$ceph_osd $extra_osd_args -i $osd $ARGS --mkfs --key $OSD_SECRET --osd-uuid $uuid $extra_seastar_args
 
             local key_fn=$CEPH_DEV_DIR/osd$osd/keyring
             cat > $key_fn<<EOF
@@ -818,8 +863,28 @@ EOF
 EOF
         fi
         echo start osd.$osd
-        run 'osd' $osd $SUDO $CEPH_BIN/$ceph_osd $extra_osd_args -i $osd $ARGS $COSD_ARGS
+        local osd_pid
+        run 'osd' $osd $SUDO $CEPH_BIN/$ceph_osd \
+            $extra_seastar_args $extra_osd_args \
+            -i $osd $ARGS $COSD_ARGS &
+        osd_pid=$!
+        if $parallel; then
+            osds_wait=$osd_pid
+        else
+            wait $osd_pid
+        fi
     done
+    if $parallel; then
+        for p in $osds_wait; do
+            wait $p
+        done
+        debug echo OSDs started
+    fi
+    if [ $inc_osd_num -gt 0 ]; then
+        # update num osd
+        new_maxosd=$($CEPH_BIN/ceph osd getmaxosd | sed -e 's/max_osd = //' -e 's/ in epoch.*//')
+        sed -i "s/num osd = .*/num osd = $new_maxosd/g" $conf_fn
+    fi
 }
 
 start_mgr() {
@@ -827,6 +892,7 @@ start_mgr() {
     local ssl=${DASHBOARD_SSL:-1}
     # avoid monitors on nearby ports (which test/*.sh use extensively)
     MGR_PORT=$(($CEPH_PORT + 1000))
+    PROMETHEUS_PORT=9283
     for name in x y z a b c d e f g h i j k l m n o p
     do
         [ $mgr -eq $CEPH_NUM_MGR ] && break
@@ -858,6 +924,8 @@ EOF
                 fi
             fi
 	    MGR_PORT=$(($MGR_PORT + 1000))
+	    ceph_adm config set mgr mgr/prometheus/$name/server_port $PROMETHEUS_PORT --force
+	    PROMETHEUS_PORT=$(($PROMETHEUS_PORT + 1000))
 
 	    ceph_adm config set mgr mgr/restful/$name/server_port $MGR_PORT --force
             if [ $mgr -eq 1 ]; then
@@ -868,31 +936,54 @@ EOF
 	    MGR_PORT=$(($MGR_PORT + 1000))
         fi
 
-        echo "Starting mgr.${name}"
+        debug echo "Starting mgr.${name}"
         run 'mgr' $name $CEPH_BIN/ceph-mgr -i $name $ARGS
     done
 
-    # use tell mgr here because the first mgr might not have activated yet
-    # to register the python module commands.
     if [ "$new" -eq 1 ]; then
         # setting login credentials for dashboard
         if $with_mgr_dashboard; then
-            ceph_adm tell mgr dashboard ac-user-create admin admin administrator
+            while ! ceph_adm -h | grep -c -q ^dashboard ; do
+                debug echo 'waiting for mgr dashboard module to start'
+                sleep 1
+            done
+            ceph_adm dashboard ac-user-create --force-password admin admin administrator
             if [ "$ssl" != "0" ]; then
-                if ! ceph_adm tell mgr dashboard create-self-signed-cert;  then
-                    echo dashboard module not working correctly!
+                if ! ceph_adm dashboard create-self-signed-cert;  then
+                    debug echo dashboard module not working correctly!
                 fi
             fi
         fi
 
-        if ceph_adm tell mgr restful create-self-signed-cert; then
+        while ! ceph_adm -h | grep -c -q ^restful ; do
+            debug echo 'waiting for mgr restful module to start'
+            sleep 1
+        done
+        if ceph_adm restful create-self-signed-cert; then
             SF=`mktemp`
             ceph_adm restful create-key admin -o $SF
             RESTFUL_SECRET=`cat $SF`
             rm $SF
         else
-            echo MGR Restful is not working, perhaps the package is not installed?
+            debug echo MGR Restful is not working, perhaps the package is not installed?
         fi
+    fi
+
+    if [ "$cephadm" -eq 1 ]; then
+        debug echo Enabling cephadm orchestrator
+	if [ "$new" -eq 1 ]; then
+		digest=$(curl -s \
+		https://registry.hub.docker.com/v2/repositories/ceph/daemon-base/tags/latest-master-devel \
+		| jq -r '.images[].digest')
+		ceph_adm config set global container_image "docker.io/ceph/daemon-base@$digest"
+	fi
+        ceph_adm config-key set mgr/cephadm/ssh_identity_key -i ~/.ssh/id_rsa
+        ceph_adm config-key set mgr/cephadm/ssh_identity_pub -i ~/.ssh/id_rsa.pub
+        ceph_adm mgr module enable cephadm
+        ceph_adm orch set backend cephadm
+        ceph_adm orch host add "$(hostname)"
+        ceph_adm orch apply crash '*'
+        ceph_adm config set mgr mgr/cephadm/allow_ptrace true
     fi
 }
 
@@ -948,12 +1039,11 @@ EOF
 
 	    # wait for volume module to load
 	    while ! ceph_adm fs volume ls ; do sleep 1 ; done
-
             local fs=0
             for name in a b c d e f g h i j k l m n o p
             do
                 ceph_adm fs volume create ${name}
-                ceph_adm fs authorize ${name} "client.fs_${name}" / rwp
+                ceph_adm fs authorize ${name} "client.fs_${name}" / rwp >> "$keyring_fn"
                 fs=$(($fs + 1))
                 [ $fs -eq $CEPH_NUM_FS ] && break
             done
@@ -962,12 +1052,111 @@ EOF
 
 }
 
+# Ganesha Daemons requires nfs-ganesha nfs-ganesha-ceph nfs-ganesha-rados-grace
+# nfs-ganesha-rados-urls (version 3.3 and above) packages installed. On
+# Fedora>=31 these packages can be installed directly with 'dnf'. For CentOS>=8
+# the packages are available at
+# https://wiki.centos.org/SpecialInterestGroup/Storage
+# Similarly for Ubuntu>=16.04 follow the instructions on
+# https://launchpad.net/~nfs-ganesha
+
+start_ganesha() {
+    cluster_id="vstart"
+    GANESHA_PORT=$(($CEPH_PORT + 4000))
+    local ganesha=0
+    test_user="ganesha-$cluster_id"
+    pool_name="nfs-ganesha"
+    namespace=$cluster_id
+    url="rados://$pool_name/$namespace/conf-nfs.$test_user"
+
+    prun ceph_adm auth get-or-create client.$test_user \
+        mon "allow r" \
+        osd "allow rw pool=$pool_name namespace=$namespace, allow rw tag cephfs data=a" \
+        mds "allow rw path=/" \
+        >> "$keyring_fn"
+
+    ceph_adm mgr module enable test_orchestrator
+    ceph_adm orch set backend test_orchestrator
+    ceph_adm test_orchestrator load_data -i $CEPH_ROOT/src/pybind/mgr/test_orchestrator/dummy_data.json
+    prun ceph_adm nfs cluster create cephfs $cluster_id
+    prun ceph_adm nfs export create cephfs "a" $cluster_id "/cephfs"
+
+    for name in a b c d e f g h i j k l m n o p
+    do
+        [ $ganesha -eq $GANESHA_DAEMON_NUM ] && break
+
+        port=$(($GANESHA_PORT + ganesha))
+        ganesha=$(($ganesha + 1))
+        ganesha_dir="$CEPH_DEV_DIR/ganesha.$name"
+        prun rm -rf $ganesha_dir
+        prun mkdir -p $ganesha_dir
+
+        echo "NFS_CORE_PARAM {
+            Enable_NLM = false;
+            Enable_RQUOTA = false;
+            Protocols = 4;
+            NFS_Port = $port;
+        }
+
+        MDCACHE {
+           Dir_Chunk = 0;
+        }
+
+        NFSv4 {
+           RecoveryBackend = rados_cluster;
+           Minor_Versions = 1, 2;
+        }
+
+        %url $url
+
+        RADOS_KV {
+           pool = $pool_name;
+           namespace = $namespace;
+           UserId = $test_user;
+           nodeid = $name;
+        }
+
+        RADOS_URLS {
+	   Userid = $test_user;
+	   watch_url = \"$url\";
+        }" > "$ganesha_dir/ganesha-$name.conf"
+	wconf <<EOF
+[ganesha.$name]
+        host = $HOSTNAME
+        ip = $IP
+        port = $port
+        ganesha data = $ganesha_dir
+        pid file = $ganesha_dir/ganesha-$name.pid
+EOF
+
+        prun env CEPH_CONF="${conf_fn}" ganesha-rados-grace --userid $test_user -p $pool_name -n $namespace add $name
+        prun env CEPH_CONF="${conf_fn}" ganesha-rados-grace --userid $test_user -p $pool_name -n $namespace
+
+        prun env CEPH_CONF="${conf_fn}" ganesha.nfsd -L "$CEPH_OUT_DIR/ganesha-$name.log" -f "$ganesha_dir/ganesha-$name.conf" -p "$CEPH_OUT_DIR/ganesha-$name.pid" -N NIV_DEBUG
+
+        # Wait few seconds for grace period to be removed
+        sleep 2
+
+        prun env CEPH_CONF="${conf_fn}" ganesha-rados-grace --userid $test_user -p $pool_name -n $namespace
+
+        if $with_mgr_dashboard; then
+            $CEPH_BIN/rados -p $pool_name put "conf-$name" "$ganesha_dir/ganesha-$name.conf"
+        fi
+
+        echo "$test_user ganesha daemon $name started on port: $port"
+    done
+
+    if $with_mgr_dashboard; then
+        ceph_adm dashboard set-ganesha-clusters-rados-pool-namespace $pool_name
+    fi
+}
+
 if [ "$debug" -eq 0 ]; then
     CMONDEBUG='
         debug mon = 10
         debug ms = 1'
 else
-    echo "** going verbose **"
+    debug echo "** going verbose **"
     CMONDEBUG='
         debug mon = 20
         debug paxos = 20
@@ -993,17 +1182,21 @@ fi
 [ -z "$INIT_CEPH" ] && INIT_CEPH=$CEPH_BIN/init-ceph
 
 # sudo if btrfs
-test -d $CEPH_DEV_DIR/osd0/. && test -e $CEPH_DEV_DIR/sudo && SUDO="sudo"
+[ -d $CEPH_DEV_DIR/osd0/. ] && [ -e $CEPH_DEV_DIR/sudo ] && SUDO="sudo"
 
-prun $SUDO rm -f core*
+if [ $inc_osd_num -eq 0 ]; then
+    prun $SUDO rm -f core*
+fi
 
-test -d $CEPH_ASOK_DIR || mkdir $CEPH_ASOK_DIR
-test -d $CEPH_OUT_DIR || mkdir $CEPH_OUT_DIR
-test -d $CEPH_DEV_DIR || mkdir $CEPH_DEV_DIR
-$SUDO rm -rf $CEPH_OUT_DIR/*
-test -d gmon && $SUDO rm -rf gmon/*
+[ -d $CEPH_ASOK_DIR ] || mkdir -p $CEPH_ASOK_DIR
+[ -d $CEPH_OUT_DIR  ] || mkdir -p $CEPH_OUT_DIR
+[ -d $CEPH_DEV_DIR  ] || mkdir -p $CEPH_DEV_DIR
+if [ $inc_osd_num -eq 0 ]; then
+    $SUDO find "$CEPH_OUT_DIR" -type f -delete
+fi
+[ -d gmon ] && $SUDO rm -rf gmon/*
 
-[ "$cephx" -eq 1 ] && [ "$new" -eq 1 ] && test -e $keyring_fn && rm $keyring_fn
+[ "$cephx" -eq 1 ] && [ "$new" -eq 1 ] && [ -e $keyring_fn ] && rm $keyring_fn
 
 
 # figure machine's ip
@@ -1036,6 +1229,11 @@ ceph_adm() {
     fi
 }
 
+if [ $inc_osd_num -gt 0 ]; then
+    start_osd
+    exit
+fi
+
 if [ "$new" -eq 1 ]; then
     prepare_conf
 fi
@@ -1043,18 +1241,18 @@ fi
 if [ $CEPH_NUM_MON -gt 0 ]; then
     start_mon
 
-    echo Populating config ...
+    debug echo Populating config ...
     cat <<EOF | $CEPH_BIN/ceph -c $conf_fn config assimilate-conf -i -
 [global]
 osd_pool_default_size = $OSD_POOL_DEFAULT_SIZE
 osd_pool_default_min_size = 1
-mon_pg_warn_min_per_osd = 3
 
 [mon]
 mon_osd_reporter_subtree_level = osd
 mon_data_avail_warn = 2
 mon_data_avail_crit = 1
 mon_allow_pool_delete = true
+mon_allow_pool_size_one = true
 
 [osd]
 osd_scrub_load_threshold = 2000
@@ -1067,10 +1265,14 @@ mds_debug_frag = true
 mds_debug_auth_pins = true
 mds_debug_subtrees = true
 
+[mgr]
+mgr/telemetry/nag = false
+mgr/telemetry/enable = false
+
 EOF
 
     if [ "$debug" -ne 0 ]; then
-        echo Setting debug configs ...
+        debug echo Setting debug configs ...
         cat <<EOF | $CEPH_BIN/ceph -c $conf_fn config assimilate-conf -i -
 [mgr]
 debug_ms = 1
@@ -1102,6 +1304,11 @@ mds_debug_scatterstat = true
 mds_verify_scatter = true
 EOF
     fi
+    if [ "$cephadm" -gt 0 ]; then
+        debug echo Setting mon public_network ...
+        public_network=$(ip route list | grep -w "$IP" | awk '{print $1}')
+        ceph_adm config set mon public_network $public_network
+    fi
 fi
 
 if [ $CEPH_NUM_MGR -gt 0 ]; then
@@ -1118,12 +1325,15 @@ if [ "$smallmds" -eq 1 ]; then
     wconf <<EOF
 [mds]
         mds log max segments = 2
-        mds cache size = 10000
+        # Default 'mds cache memory limit' is 1GiB, and here we set it to 100MiB.
+        mds cache memory limit = 100M
 EOF
 fi
 
 if [ $CEPH_NUM_MDS -gt 0 ]; then
     start_mds
+    # key with access to all FS
+    ceph_adm fs authorize \* "client.fs" / rwp >> "$keyring_fn"
 fi
 
 # Don't set max_mds until all the daemons are started, otherwise
@@ -1146,17 +1356,32 @@ done
 if [ "$ec" -eq 1 ]; then
     ceph_adm <<EOF
 osd erasure-code-profile set ec-profile m=2 k=2
-osd pool create ec 8 8 erasure ec-profile
+osd pool create ec erasure ec-profile
 EOF
+fi
+
+# Ganesha Daemons
+if [ $GANESHA_DAEMON_NUM -gt 0 ]; then
+    pseudo_path="/cephfs"
+    if [ "$cephadm" -gt 0 ]; then
+        cluster_id="vstart"
+        prun ceph_adm nfs cluster create cephfs $cluster_id
+        prun ceph_adm nfs export create cephfs "a" $cluster_id $pseudo_path
+        port="2049"
+    else
+        start_ganesha
+        port="<ganesha-port-num>"
+    fi
+    echo "Mount using: mount -t nfs -o port=$port $IP:$pseudo_path mountpoint"
 fi
 
 do_cache() {
     while [ -n "$*" ]; do
         p="$1"
         shift
-        echo "creating cache for pool $p ..."
+        debug echo "creating cache for pool $p ..."
         ceph_adm <<EOF
-osd pool create ${p}-cache 8
+osd pool create ${p}-cache
 osd tier add $p ${p}-cache
 osd tier cache-mode ${p}-cache writeback
 osd tier set-overlay $p ${p}-cache
@@ -1171,7 +1396,7 @@ do_hitsets() {
         type="$2"
         shift
         shift
-        echo "setting hit_set on pool $pool type $type ..."
+        debug echo "setting hit_set on pool $pool type $type ..."
         ceph_adm <<EOF
 osd pool set $pool hit_set_type $type
 osd pool set $pool hit_set_count 8
@@ -1186,12 +1411,12 @@ do_rgw_create_users()
     # Create S3 user
     local akey='0555b35654ad1656d804'
     local skey='h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q=='
-    echo "setting up user testid"
+    debug echo "setting up user testid"
     $CEPH_BIN/radosgw-admin user create --uid testid --access-key $akey --secret $skey --display-name 'M. Tester' --email tester@ceph.com -c $conf_fn > /dev/null
 
     # Create S3-test users
     # See: https://github.com/ceph/s3-tests
-    echo "setting up s3-test users"
+    debug echo "setting up s3-test users"
     $CEPH_BIN/radosgw-admin user create \
         --uid 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
         --access-key ABCDEFGHIJKLMNOPQRST \
@@ -1213,7 +1438,7 @@ do_rgw_create_users()
         --email tenanteduser@example.com -c $conf_fn > /dev/null
 
     # Create Swift user
-    echo "setting up user tester"
+    debug echo "setting up user tester"
     $CEPH_BIN/radosgw-admin user create -c $conf_fn --subuser=test:tester --display-name=Tester-Subuser --key-type=swift --secret=testing --access=full > /dev/null
 
     echo ""
@@ -1233,7 +1458,7 @@ do_rgw()
     if [ "$new" -eq 1 ]; then
         do_rgw_create_users
         if [ -n "$rgw_compression" ]; then
-            echo "setting compression type=$rgw_compression"
+            debug echo "setting compression type=$rgw_compression"
             $CEPH_BIN/radosgw-admin zone placement modify -c $conf_fn --rgw-zone=default --placement-id=default-placement --compression=$rgw_compression > /dev/null
         fi
     fi
@@ -1252,21 +1477,37 @@ do_rgw()
     fi
     RGWSUDO=
     [ $CEPH_RGW_PORT_NUM -lt 1024 ] && RGWSUDO=sudo
-    n=$(($CEPH_NUM_RGW - 1))
-    i=0
-    for rgw in j k l m n o p q r s t u v; do
-        current_port=$((CEPH_RGW_PORT_NUM + i))
-        echo start rgw on http${CEPH_RGW_HTTPS}://localhost:${current_port}
-        run 'rgw' $current_port $RGWSUDO $CEPH_BIN/radosgw -c $conf_fn --log-file=${CEPH_OUT_DIR}/radosgw.${current_port}.log --admin-socket=${CEPH_OUT_DIR}/radosgw.${current_port}.asok --pid-file=${CEPH_OUT_DIR}/radosgw.${current_port}.pid ${RGWDEBUG} -n client.rgw "--rgw_frontends=${rgw_frontend} port=${current_port}${CEPH_RGW_HTTPS}"
+
+    current_port=$CEPH_RGW_PORT
+    for n in $(seq 1 $CEPH_NUM_RGW); do
+        rgw_name="client.rgw.${current_port}"
+
+        ceph_adm auth get-or-create $rgw_name \
+            mon 'allow rw' \
+            osd 'allow rwx' \
+            mgr 'allow rw' \
+            >> "$keyring_fn"
+
+        debug echo start rgw on http${CEPH_RGW_HTTPS}://localhost:${current_port}
+        run 'rgw' $current_port $RGWSUDO $CEPH_BIN/radosgw -c $conf_fn \
+            --log-file=${CEPH_OUT_DIR}/radosgw.${current_port}.log \
+            --admin-socket=${CEPH_OUT_DIR}/radosgw.${current_port}.asok \
+            --pid-file=${CEPH_OUT_DIR}/radosgw.${current_port}.pid \
+            ${RGWDEBUG} \
+            -n ${rgw_name} \
+            "--rgw_frontends=${rgw_frontend} port=${current_port}${CEPH_RGW_HTTPS}"
+
         i=$(($i + 1))
         [ $i -eq $CEPH_NUM_RGW ] && break
+
+        current_port=$((current_port+1))
     done
 }
 if [ "$CEPH_NUM_RGW" -gt 0 ]; then
     do_rgw
 fi
 
-echo "started.  stop.sh to stop.  see out/* (e.g. 'tail -f out/????') for debug output."
+debug echo "vstart cluster complete. Use stop.sh to stop. See out/* (e.g. 'tail -f out/????') for debug output."
 
 echo ""
 if [ "$new" -eq 1 ]; then
@@ -1288,7 +1529,7 @@ echo ""
     echo "#"
 } > $CEPH_DIR/vstart_environment.sh
 {
-    echo "export PYTHONPATH=$PYBIND:$CEPH_LIB/cython_modules/lib.${CEPH_PY_VERSION_MAJOR}:\$PYTHONPATH"
+    echo "export PYTHONPATH=$PYBIND:$CYTHON_PYTHONPATH:$CEPH_PYTHON_COMMON\$PYTHONPATH"
     echo "export LD_LIBRARY_PATH=$CEPH_LIB:\$LD_LIBRARY_PATH"
 
     if [ "$CEPH_DIR" != "$PWD" ]; then
@@ -1303,3 +1544,16 @@ echo ""
 
 echo "CEPH_DEV=1"
 
+# always keep this section at the very bottom of this file
+STRAY_CONF_PATH="/etc/ceph/ceph.conf"
+if [ -f "$STRAY_CONF_PATH" -a -n "$conf_fn" -a ! "$conf_fn" -ef "$STRAY_CONF_PATH" ]; then
+    echo ""
+    echo ""
+    echo "WARNING:"
+    echo "    Please remove stray $STRAY_CONF_PATH if not needed."
+    echo "    Your conf files $conf_fn and $STRAY_CONF_PATH may not be in sync"
+    echo "    and may lead to undesired results."
+    echo ""
+    echo "NOTE:"
+    echo "    Remember to restart cluster after removing $STRAY_CONF_PATH"
+fi

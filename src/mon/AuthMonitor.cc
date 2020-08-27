@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 /*
  * Ceph - scalable distributed file system
@@ -7,9 +7,9 @@
  *
  * This is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
- * License version 2.1, as published by the Free Software 
+ * License version 2.1, as published by the Free Software
  * Foundation.  See file COPYING.
- * 
+ *
  */
 
 #include <sstream>
@@ -34,11 +34,41 @@
 #include "include/ceph_assert.h"
 
 #include "mds/MDSAuthCaps.h"
+#include "mgr/MgrCap.h"
 #include "osd/OSDCap.h"
 
 #define dout_subsys ceph_subsys_mon
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, mon, get_last_committed())
+using namespace TOPNSPC::common;
+
+using std::cerr;
+using std::cout;
+using std::dec;
+using std::hex;
+using std::list;
+using std::map;
+using std::make_pair;
+using std::ostream;
+using std::ostringstream;
+using std::pair;
+using std::set;
+using std::setfill;
+using std::string;
+using std::stringstream;
+using std::to_string;
+using std::vector;
+using std::unique_ptr;
+
+using ceph::bufferlist;
+using ceph::decode;
+using ceph::encode;
+using ceph::Formatter;
+using ceph::JSONFormatter;
+using ceph::make_message;
+using ceph::mono_clock;
+using ceph::mono_time;
+using ceph::timespan_str;
 static ostream& _prefix(std::ostream *_dout, Monitor *mon, version_t v) {
   return *_dout << "mon." << mon->name << "@" << mon->rank
 		<< "(" << mon->get_state_name()
@@ -418,7 +448,8 @@ void AuthMonitor::encode_pending(MonitorDBStore::TransactionRef t)
   if (bad_detail.size()) {
     ostringstream ss;
     ss << bad_detail.size() << " auth entities have invalid capabilities";
-    health_check_t *check = &next.add("AUTH_BAD_CAPS", HEALTH_ERR, ss.str());
+    health_check_t *check = &next.add("AUTH_BAD_CAPS", HEALTH_ERR, ss.str(),
+				      bad_detail.size());
     for (auto& i : bad_detail) {
       for (auto& j : i.second) {
 	check->detail.push_back(j);
@@ -463,7 +494,7 @@ version_t AuthMonitor::get_trim_to() const
 
 bool AuthMonitor::preprocess_query(MonOpRequestRef op)
 {
-  PaxosServiceMessage *m = static_cast<PaxosServiceMessage*>(op->get_req());
+  auto m = op->get_req<PaxosServiceMessage>();
   dout(10) << "preprocess_query " << *m << " from " << m->get_orig_source_inst() << dendl;
   switch (m->get_type()) {
   case MSG_MON_COMMAND:
@@ -489,7 +520,7 @@ bool AuthMonitor::preprocess_query(MonOpRequestRef op)
 
 bool AuthMonitor::prepare_update(MonOpRequestRef op)
 {
-  PaxosServiceMessage *m = static_cast<PaxosServiceMessage*>(op->get_req());
+  auto m = op->get_req<PaxosServiceMessage>();
   dout(10) << "prepare_update " << *m << " from " << m->get_orig_source_inst() << dendl;
   switch (m->get_type()) {
   case MSG_MON_COMMAND:
@@ -568,7 +599,7 @@ uint64_t AuthMonitor::assign_global_id(bool should_increase_max)
 
 bool AuthMonitor::prep_auth(MonOpRequestRef op, bool paxos_writable)
 {
-  MAuth *m = static_cast<MAuth*>(op->get_req());
+  auto m = op->get_req<MAuth>();
   dout(10) << "prep_auth() blob_size=" << m->get_auth_payload().length() << dendl;
 
   MonSession *s = op->get_session();
@@ -596,7 +627,7 @@ bool AuthMonitor::prep_auth(MonOpRequestRef op, bool paxos_writable)
       decode(supported, indata);
       decode(entity_name, indata);
       decode(s->con->peer_global_id, indata);
-    } catch (const buffer::error &e) {
+    } catch (const ceph::buffer::error &e) {
       dout(10) << "failed to decode initial auth message" << dendl;
       ret = -EINVAL;
       goto reply;
@@ -735,7 +766,7 @@ bool AuthMonitor::prep_auth(MonOpRequestRef op, bool paxos_writable)
       }
       ret = 0;
     }
-  } catch (const buffer::error &err) {
+  } catch (const ceph::buffer::error &err) {
     ret = -EINVAL;
     dout(0) << "caught error when trying to handle auth request, probably malformed request" << dendl;
   }
@@ -756,7 +787,7 @@ done:
 
 bool AuthMonitor::preprocess_command(MonOpRequestRef op)
 {
-  MMonCommand *m = static_cast<MMonCommand*>(op->get_req());
+  auto m = op->get_req<MMonCommand>();
   int r = -1;
   bufferlist rdata;
   stringstream ss, ds;
@@ -770,7 +801,7 @@ bool AuthMonitor::preprocess_command(MonOpRequestRef op)
   }
 
   string prefix;
-  cmd_getval(g_ceph_context, cmdmap, "prefix", prefix);
+  cmd_getval(cmdmap, "prefix", prefix);
   if (prefix == "auth add" ||
       prefix == "auth del" ||
       prefix == "auth rm" ||
@@ -790,7 +821,7 @@ bool AuthMonitor::preprocess_command(MonOpRequestRef op)
 
   // entity might not be supplied, but if it is, it should be valid
   string entity_name;
-  cmd_getval(g_ceph_context, cmdmap, "entity", entity_name);
+  cmd_getval(cmdmap, "entity", entity_name);
   EntityName entity;
   if (!entity_name.empty() && !entity.from_str(entity_name)) {
     ss << "invalid entity_auth " << entity_name;
@@ -799,7 +830,7 @@ bool AuthMonitor::preprocess_command(MonOpRequestRef op)
   }
 
   string format;
-  cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
+  cmd_getval(cmdmap, "format", format, string("plain"));
   boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
   if (prefix == "auth export") {
@@ -1088,7 +1119,7 @@ int _create_auth(
     return -EINVAL;
   try {
     auth.key.decode_base64(key);
-  } catch (buffer::error& e) {
+  } catch (ceph::buffer::error& e) {
     return -EINVAL;
   }
   auth.caps = caps;
@@ -1240,9 +1271,14 @@ bool AuthMonitor::valid_caps(
     const string& caps,
     ostream *out)
 {
-  if (type == "mon" || type == "mgr") {
-    MonCap tmp;
-    if (!tmp.parse(caps, out)) {
+  if (type == "mon") {
+    MonCap moncap;
+    if (!moncap.parse(caps, out)) {
+      return false;
+    }
+  } else if (type == "mgr") {
+    MgrCap mgrcap;
+    if (!mgrcap.parse(caps, out)) {
       return false;
     }
   } else if (type == "osd") {
@@ -1281,7 +1317,7 @@ bool AuthMonitor::valid_caps(const vector<string>& caps, ostream *out)
 
 bool AuthMonitor::prepare_command(MonOpRequestRef op)
 {
-  MMonCommand *m = static_cast<MMonCommand*>(op->get_req());
+  auto m = op->get_req<MMonCommand>();
   stringstream ss, ds;
   bufferlist rdata;
   string rs;
@@ -1300,10 +1336,10 @@ bool AuthMonitor::prepare_command(MonOpRequestRef op)
   string entity_name;
   EntityName entity;
 
-  cmd_getval(g_ceph_context, cmdmap, "prefix", prefix);
+  cmd_getval(cmdmap, "prefix", prefix);
 
   string format;
-  cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
+  cmd_getval(cmdmap, "format", format, string("plain"));
   boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
   MonSession *session = op->get_session();
@@ -1312,14 +1348,14 @@ bool AuthMonitor::prepare_command(MonOpRequestRef op)
     return true;
   }
 
-  cmd_getval(g_ceph_context, cmdmap, "caps", caps_vec);
+  cmd_getval(cmdmap, "caps", caps_vec);
   if ((caps_vec.size() % 2) != 0) {
     ss << "bad capabilities request; odd number of arguments";
     err = -EINVAL;
     goto done;
   }
 
-  cmd_getval(g_ceph_context, cmdmap, "entity", entity_name);
+  cmd_getval(cmdmap, "entity", entity_name);
   if (!entity_name.empty() && !entity.from_str(entity_name)) {
     ss << "bad entity name";
     err = -EINVAL;
@@ -1338,7 +1374,7 @@ bool AuthMonitor::prepare_command(MonOpRequestRef op)
     KeyRing keyring;
     try {
       decode(keyring, iter);
-    } catch (const buffer::error &ex) {
+    } catch (const ceph::buffer::error &ex) {
       ss << "error decoding keyring" << " " << ex.what();
       err = -EINVAL;
       goto done;
@@ -1373,7 +1409,7 @@ bool AuthMonitor::prepare_command(MonOpRequestRef op)
       auto iter = bl.cbegin();
       try {
         decode(new_keyring, iter);
-      } catch (const buffer::error &ex) {
+      } catch (const ceph::buffer::error &ex) {
         ss << "error decoding keyring";
         err = -EINVAL;
         goto done;
@@ -1556,7 +1592,7 @@ bool AuthMonitor::prepare_command(MonOpRequestRef op)
     return true;
   } else if (prefix == "fs authorize") {
     string filesystem;
-    cmd_getval(g_ceph_context, cmdmap, "filesystem", filesystem);
+    cmd_getval(cmdmap, "filesystem", filesystem);
     string mds_cap_string, osd_cap_string;
     string osd_cap_wanted = "r";
 
@@ -1754,7 +1790,7 @@ bool AuthMonitor::_upgrade_format_to_dumpling()
       auto it = p->second.caps["mon"].cbegin();
       decode(mon_caps, it);
     }
-    catch (const buffer::error&) {
+    catch (const ceph::buffer::error&) {
       dout(10) << __func__ << " unable to parse mon cap for "
 	       << p->first << dendl;
       continue;
@@ -1766,7 +1802,7 @@ bool AuthMonitor::_upgrade_format_to_dumpling()
     // set daemon profiles
     if ((p->first.is_osd() || p->first.is_mds()) &&
         mon_caps == "allow rwx") {
-      new_caps = string("allow profile ") + p->first.get_type_name();
+      new_caps = string("allow profile ") + std::string(p->first.get_type_name());
     }
 
     // update bootstrap keys

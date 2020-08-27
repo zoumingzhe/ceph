@@ -24,6 +24,7 @@
 #include <seastar/core/lowres_clock.hh>
 #endif
 
+#include "include/compat.h"
 #include "include/types.h"
 #include "include/timegm.h"
 #include "common/strtol.h"
@@ -81,6 +82,13 @@ public:
   explicit utime_t(const std::chrono::time_point<Clock>& t)
     : utime_t(Clock::to_timespec(t)) {} // forward to timespec ctor
 
+  template<class Rep, class Period>
+  explicit utime_t(const std::chrono::duration<Rep, Period>& dur) {
+    using common_t = std::common_type_t<Rep, int>;
+    tv.tv_sec = std::max<common_t>(std::chrono::duration_cast<std::chrono::seconds>(dur).count(), 0);
+    tv.tv_nsec = std::max<common_t>((std::chrono::duration_cast<std::chrono::nanoseconds>(dur) %
+				     std::chrono::seconds(1)).count(), 0);
+  }
 #if defined(WITH_SEASTAR)
   explicit utime_t(const seastar::lowres_system_clock::time_point& t) {
     tv.tv_sec = std::chrono::duration_cast<std::chrono::seconds>(
@@ -232,7 +240,7 @@ public:
   }
 
   // output
-  std::ostream& gmtime(std::ostream& out) const {
+  std::ostream& gmtime(std::ostream& out, bool legacy_form=false) const {
     out.setf(std::ios::right);
     char oldfill = out.fill();
     out.fill('0');
@@ -247,9 +255,13 @@ public:
       gmtime_r(&tt, &bdt);
       out << std::setw(4) << (bdt.tm_year+1900)  // 2007 -> '07'
 	  << '-' << std::setw(2) << (bdt.tm_mon+1)
-	  << '-' << std::setw(2) << bdt.tm_mday
-	  << 'T'
-	  << std::setw(2) << bdt.tm_hour
+	  << '-' << std::setw(2) << bdt.tm_mday;
+      if (legacy_form) {
+	out << ' ';
+      } else {
+	out << 'T';
+      }
+      out << std::setw(2) << bdt.tm_hour
 	  << ':' << std::setw(2) << bdt.tm_min
 	  << ':' << std::setw(2) << bdt.tm_sec;
       out << "." << std::setw(6) << usec();
@@ -315,7 +327,7 @@ public:
     return out;
   }
 
-  std::ostream& localtime(std::ostream& out) const {
+  std::ostream& localtime(std::ostream& out, bool legacy_form=false) const {
     out.setf(std::ios::right);
     char oldfill = out.fill();
     out.fill('0');
@@ -330,15 +342,21 @@ public:
       localtime_r(&tt, &bdt);
       out << std::setw(4) << (bdt.tm_year+1900)  // 2007 -> '07'
 	  << '-' << std::setw(2) << (bdt.tm_mon+1)
-	  << '-' << std::setw(2) << bdt.tm_mday
-	  << 'T'
-	  << std::setw(2) << bdt.tm_hour
+	  << '-' << std::setw(2) << bdt.tm_mday;
+      if (legacy_form) {
+	out << ' ';
+      } else {
+	out << 'T';
+      }
+      out << std::setw(2) << bdt.tm_hour
 	  << ':' << std::setw(2) << bdt.tm_min
 	  << ':' << std::setw(2) << bdt.tm_sec;
       out << "." << std::setw(6) << usec();
-      char buf[32] = { 0 };
-      strftime(buf, sizeof(buf), "%z", &bdt);
-      out << buf;
+      if (!legacy_form) {
+	char buf[32] = { 0 };
+	strftime(buf, sizeof(buf), "%z", &bdt);
+	out << buf;
+      }
     }
     out.fill(oldfill);
     out.unsetf(std::ios::right);
@@ -449,11 +467,15 @@ public:
       }
     }
 
+    #ifndef _WIN32
     // apply the tm_gmtoff manually below, since none of mktime,
     // gmtime, and localtime seem to do it.  zero it out here just in
     // case some other libc *does* apply it.  :(
     auto gmtoff = tm.tm_gmtoff;
     tm.tm_gmtoff = 0;
+    #else
+    auto gmtoff = _timezone;
+    #endif /* _WIN32 */
 
     time_t t = internal_timegm(&tm);
     if (epoch)
@@ -463,12 +485,12 @@ public:
 
     if (out_date) {
       char buf[32];
-      strftime(buf, sizeof(buf), "%F", &tm);
+      strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
       *out_date = buf;
     }
     if (out_time) {
       char buf[32];
-      strftime(buf, sizeof(buf), "%T", &tm);
+      strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
       *out_time = buf;
     }
 

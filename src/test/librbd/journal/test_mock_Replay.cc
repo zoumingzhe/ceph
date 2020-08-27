@@ -117,12 +117,12 @@ MATCHER_P(CStrEq, str, "") {
 }
 
 ACTION_P2(NotifyInvoke, lock, cond) {
-  Mutex::Locker locker(*lock);
-  cond->Signal();
+  std::lock_guard locker{*lock};
+  cond->notify_all();
 }
 
 ACTION_P2(CompleteAioCompletion, r, image_ctx) {
-  image_ctx->op_work_queue->queue(new FunctionContext([this, arg0](int r) {
+  image_ctx->op_work_queue->queue(new LambdaContext([this, arg0](int r) {
       arg0->get();
       arg0->init_time(image_ctx, librbd::io::AIO_TYPE_NONE);
       arg0->set_request_count(1);
@@ -138,8 +138,7 @@ public:
   typedef io::ImageRequest<MockReplayImageCtx> MockIoImageRequest;
   typedef Replay<MockReplayImageCtx> MockJournalReplay;
 
-  TestMockJournalReplay() : m_invoke_lock("m_invoke_lock") {
-  }
+  TestMockJournalReplay() = default;
 
   void expect_accept_ops(MockExclusiveLock &mock_exclusive_lock, bool accept) {
     EXPECT_CALL(mock_exclusive_lock, accept_ops()).WillRepeatedly(
@@ -219,8 +218,9 @@ public:
   void expect_snap_create(MockReplayImageCtx &mock_image_ctx,
                           Context **on_finish, const char *snap_name,
                           uint64_t op_tid) {
-    EXPECT_CALL(*mock_image_ctx.operations, execute_snap_create(_, StrEq(snap_name), _,
-                                                                op_tid, false))
+    EXPECT_CALL(*mock_image_ctx.operations,
+                execute_snap_create(_, StrEq(snap_name), _, op_tid,
+                                    SNAP_CREATE_FLAG_SKIP_NOTIFY_QUIESCE, _))
                   .WillOnce(DoAll(SaveArg<2>(on_finish),
                                   NotifyInvoke(&m_invoke_lock, &m_invoke_cond)));
   }
@@ -341,10 +341,8 @@ public:
 
   void wait_for_op_invoked(Context **on_finish, int r) {
     {
-      Mutex::Locker locker(m_invoke_lock);
-      while (*on_finish == nullptr) {
-        m_invoke_cond.Wait(m_invoke_lock);
-      }
+      std::unique_lock locker{m_invoke_lock};      
+      m_invoke_cond.wait(locker, [on_finish] { return *on_finish != nullptr; });
     }
     (*on_finish)->complete(r);
   }
@@ -355,8 +353,8 @@ public:
     return bl;
   }
 
-  Mutex m_invoke_lock;
-  Cond m_invoke_cond;
+  ceph::mutex m_invoke_lock = ceph::make_mutex("m_invoke_lock");
+  ceph::condition_variable m_invoke_cond;
 };
 
 TEST_F(TestMockJournalReplay, AioDiscard) {
@@ -833,6 +831,7 @@ TEST_F(TestMockJournalReplay, MissingOpFinishEvent) {
 					  "snap")},
                &on_snap_remove_ready,
 	       &on_snap_remove_safe);
+  ictx->op_work_queue->drain();
   ASSERT_EQ(0, on_snap_remove_ready.wait());
 
   C_SaferCond on_snap_create_ready;
@@ -843,6 +842,7 @@ TEST_F(TestMockJournalReplay, MissingOpFinishEvent) {
 					  "snap")},
                &on_snap_create_ready,
 	       &on_snap_create_safe);
+  ictx->op_work_queue->drain();
 
   C_SaferCond on_shut_down;
   mock_journal_replay.shut_down(false, &on_shut_down);
@@ -889,6 +889,7 @@ TEST_F(TestMockJournalReplay, MissingOpFinishEventCancelOps) {
 					  "snap")},
                &on_snap_remove_ready,
 	       &on_snap_remove_safe);
+  ictx->op_work_queue->drain();
   ASSERT_EQ(0, on_snap_remove_ready.wait());
 
   C_SaferCond on_snap_create_ready;
@@ -899,6 +900,7 @@ TEST_F(TestMockJournalReplay, MissingOpFinishEventCancelOps) {
 					  "snap")},
                &on_snap_create_ready,
 	       &on_snap_create_safe);
+  ictx->op_work_queue->drain();
 
   C_SaferCond on_resume;
   when_replay_op_ready(mock_journal_replay, 123, &on_resume);

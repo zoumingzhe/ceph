@@ -82,6 +82,9 @@ of the master zone group.
 See `Pools`_ for instructions on creating and tuning pools for Ceph
 Object Storage.
 
+See `Sync Policy Config`_ for instructions on defining fine grained bucket sync
+policy rules.
+
 .. _master-zone-label:
 
 Configuring a Master Zone
@@ -230,7 +233,7 @@ the default zone group first.
 
     # radosgw-admin zonegroup remove --rgw-zonegroup=default --rgw-zone=default
     # radosgw-admin period update --commit
-    # radosgw-admin zone delete --rgw-zone=default
+    # radosgw-admin zone rm --rgw-zone=default
     # radosgw-admin period update --commit
     # radosgw-admin zonegroup delete --rgw-zonegroup=default
     # radosgw-admin period update --commit
@@ -407,7 +410,7 @@ Delete the default zone if needed.
 
 ::
 
-    # radosgw-admin zone delete --rgw-zone=default
+    # radosgw-admin zone rm --rgw-zone=default
 
 Finally, delete the default pools in your Ceph storage cluster if
 needed.
@@ -637,6 +640,8 @@ If the former master zone recovers, revert the operation.
    ::
 
        # systemctl restart ceph-radosgw@rgw.`hostname -s`
+
+.. _rgw-multisite-migrate-from-single-site:
 
 Migrating a Single Site System to Multi-Site
 ============================================
@@ -1280,7 +1285,7 @@ Next, delete the zone. Execute the following:
 
 ::
 
-    # radosgw-admin zone delete --rgw-zone<name>
+    # radosgw-admin zone rm --rgw-zone<name>
 
 Finally, update the period:
 
@@ -1448,3 +1453,4 @@ instance.
 
 
 .. _`Pools`: ../pools
+.. _`Sync Policy Config`: ../multisite-sync-policy

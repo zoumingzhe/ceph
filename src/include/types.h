@@ -24,19 +24,9 @@
 #include <fcntl.h>
 #include <string.h>
 
-// <macro hackery>
-// temporarily remap __le* to ceph_le* for benefit of shared kernel/userland headers
-#define __le16 ceph_le16
-#define __le32 ceph_le32
-#define __le64 ceph_le64
 #include "ceph_fs.h"
 #include "ceph_frag.h"
 #include "rbd_types.h"
-#undef __le16
-#undef __le32
-#undef __le64
-// </macro hackery>
-
 
 #ifdef __cplusplus
 #ifndef _BACKWARD_BACKWARD_WARNING_H
@@ -334,7 +324,8 @@ WRITE_RAW_ENCODER(ceph_mds_request_head)
 WRITE_RAW_ENCODER(ceph_mds_request_release)
 WRITE_RAW_ENCODER(ceph_filelock)
 WRITE_RAW_ENCODER(ceph_mds_caps_head)
-WRITE_RAW_ENCODER(ceph_mds_caps_body_legacy)
+WRITE_RAW_ENCODER(ceph_mds_caps_export_body)
+WRITE_RAW_ENCODER(ceph_mds_caps_non_export_body)
 WRITE_RAW_ENCODER(ceph_mds_cap_peer)
 WRITE_RAW_ENCODER(ceph_mds_cap_release)
 WRITE_RAW_ENCODER(ceph_mds_cap_item)
@@ -584,7 +575,7 @@ struct sha_digest_t {
     for (size_t i = 0; i < S; i++) {
       ::sprintf(&str[i * 2], "%02x", static_cast<int>(v[i]));
     }
-    return string(str);
+    return std::string(str);
   }
   sha_digest_t(const unsigned char *_v) { memcpy(v, _v, SIZE); };
   sha_digest_t() {}

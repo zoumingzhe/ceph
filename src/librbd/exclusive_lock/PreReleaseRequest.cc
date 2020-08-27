@@ -5,14 +5,16 @@
 #include "common/AsyncOpTracker.h"
 #include "common/dout.h"
 #include "common/errno.h"
+#include "librbd/cache/rwl/ShutdownRequest.h"
 #include "librbd/ExclusiveLock.h"
 #include "librbd/ImageState.h"
 #include "librbd/ImageWatcher.h"
 #include "librbd/Journal.h"
 #include "librbd/ObjectMap.h"
 #include "librbd/Utils.h"
-#include "librbd/io/ImageRequestWQ.h"
-#include "librbd/io/ObjectDispatcher.h"
+#include "librbd/exclusive_lock/ImageDispatch.h"
+#include "librbd/io/ImageDispatcherInterface.h"
+#include "librbd/io/ObjectDispatcherInterface.h"
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -27,18 +29,20 @@ using util::create_context_callback;
 
 template <typename I>
 PreReleaseRequest<I>* PreReleaseRequest<I>::create(
-    I &image_ctx, bool shutting_down, AsyncOpTracker &async_op_tracker,
-    Context *on_finish) {
-  return new PreReleaseRequest(image_ctx, shutting_down, async_op_tracker,
-                               on_finish);
+    I &image_ctx, ImageDispatch<I>* image_dispatch, bool shutting_down,
+    AsyncOpTracker &async_op_tracker, Context *on_finish) {
+  return new PreReleaseRequest(image_ctx, image_dispatch, shutting_down,
+                               async_op_tracker, on_finish);
 }
 
 template <typename I>
-PreReleaseRequest<I>::PreReleaseRequest(I &image_ctx, bool shutting_down,
+PreReleaseRequest<I>::PreReleaseRequest(I &image_ctx,
+                                        ImageDispatch<I>* image_dispatch,
+                                        bool shutting_down,
                                         AsyncOpTracker &async_op_tracker,
                                         Context *on_finish)
-  : m_image_ctx(image_ctx), m_shutting_down(shutting_down),
-    m_async_op_tracker(async_op_tracker),
+  : m_image_ctx(image_ctx), m_image_dispatch(image_dispatch),
+    m_shutting_down(shutting_down), m_async_op_tracker(async_op_tracker),
     m_on_finish(create_async_context_callback(image_ctx, on_finish)) {
 }
 
@@ -108,17 +112,13 @@ void PreReleaseRequest<I>::send_block_writes() {
   Context *ctx = create_context_callback<
     klass, &klass::handle_block_writes>(this);
 
-  {
-    RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
-    // setting the lock as required will automatically cause the IO
-    // queue to re-request the lock if any IO is queued
-    if (m_image_ctx.clone_copy_on_read ||
-        m_image_ctx.test_features(RBD_FEATURE_JOURNALING)) {
-      m_image_ctx.io_work_queue->set_require_lock(io::DIRECTION_BOTH, true);
-    } else {
-      m_image_ctx.io_work_queue->set_require_lock(io::DIRECTION_WRITE, true);
-    }
-    m_image_ctx.io_work_queue->block_writes(ctx);
+  // setting the lock as required will automatically cause the IO
+  // queue to re-request the lock if any IO is queued
+  if (m_image_ctx.clone_copy_on_read ||
+      m_image_ctx.test_features(RBD_FEATURE_JOURNALING)) {
+    m_image_dispatch->set_require_lock(io::DIRECTION_BOTH, ctx);
+  } else {
+    m_image_dispatch->set_require_lock(io::DIRECTION_WRITE, ctx);
   }
 }
 
@@ -127,13 +127,13 @@ void PreReleaseRequest<I>::handle_block_writes(int r) {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 10) << "r=" << r << dendl;
 
-  if (r == -EBLACKLISTED) {
-    // allow clean shut down if blacklisted
-    lderr(cct) << "failed to block writes because client is blacklisted"
+  if (r == -EBLOCKLISTED) {
+    // allow clean shut down if blocklisted
+    lderr(cct) << "failed to block writes because client is blocklisted"
                << dendl;
   } else if (r < 0) {
     lderr(cct) << "failed to block writes: " << cpp_strerror(r) << dendl;
-    m_image_ctx.io_work_queue->unblock_writes();
+    m_image_dispatch->unset_require_lock(io::DIRECTION_BOTH);
     save_result(r);
     finish();
     return;
@@ -157,6 +157,42 @@ void PreReleaseRequest<I>::handle_wait_for_ops(int r) {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 10) << dendl;
 
+  send_shut_down_image_cache();
+}
+
+template <typename I>
+void PreReleaseRequest<I>::send_shut_down_image_cache() {
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 10) << dendl;
+
+  /* Shut down existing image cache whether the feature bit is on or not */
+  if (!m_image_ctx.image_cache) {
+     send_invalidate_cache();
+    return;
+  }
+  std::shared_lock owner_lock{m_image_ctx.owner_lock};
+  Context *ctx = create_async_context_callback(m_image_ctx, create_context_callback<
+      PreReleaseRequest<I>,
+      &PreReleaseRequest<I>::handle_shut_down_image_cache>(this));
+  cache::rwl::ShutdownRequest<I> *req = cache::rwl::ShutdownRequest<I>::create(
+    m_image_ctx, ctx);
+  req->send();
+}
+
+template <typename I>
+void PreReleaseRequest<I>::handle_shut_down_image_cache(int r) {
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 10) << "r=" << r << dendl;
+
+  if (r < 0) {
+    lderr(cct) << "failed to shut down image cache: " << cpp_strerror(r)
+               << dendl;
+    m_image_dispatch->unset_require_lock(io::DIRECTION_BOTH);
+    save_result(r);
+    finish();
+    return;
+  }
+
   send_invalidate_cache();
 }
 
@@ -165,7 +201,7 @@ void PreReleaseRequest<I>::send_invalidate_cache() {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 10) << dendl;
 
-  RWLock::RLocker owner_lock(m_image_ctx.owner_lock);
+  std::shared_lock owner_lock{m_image_ctx.owner_lock};
   Context *ctx = create_context_callback<
       PreReleaseRequest<I>,
       &PreReleaseRequest<I>::handle_invalidate_cache>(this);
@@ -177,10 +213,10 @@ void PreReleaseRequest<I>::handle_invalidate_cache(int r) {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 10) << "r=" << r << dendl;
 
-  if (r < 0 && r != -EBLACKLISTED && r != -EBUSY) {
+  if (r < 0 && r != -EBLOCKLISTED && r != -EBUSY) {
     lderr(cct) << "failed to invalidate cache: " << cpp_strerror(r)
                << dendl;
-    m_image_ctx.io_work_queue->unblock_writes();
+    m_image_dispatch->unset_require_lock(io::DIRECTION_BOTH);
     save_result(r);
     finish();
     return;
@@ -212,7 +248,7 @@ void PreReleaseRequest<I>::handle_flush_notifies(int r) {
 template <typename I>
 void PreReleaseRequest<I>::send_close_journal() {
   {
-    RWLock::WLocker image_locker(m_image_ctx.image_lock);
+    std::unique_lock image_locker{m_image_ctx.image_lock};
     std::swap(m_journal, m_image_ctx.journal);
   }
 
@@ -240,7 +276,8 @@ void PreReleaseRequest<I>::handle_close_journal(int r) {
     lderr(cct) << "failed to close journal: " << cpp_strerror(r) << dendl;
   }
 
-  delete m_journal;
+  m_journal->put();
+  m_journal = nullptr;
 
   send_close_object_map();
 }
@@ -248,7 +285,7 @@ void PreReleaseRequest<I>::handle_close_journal(int r) {
 template <typename I>
 void PreReleaseRequest<I>::send_close_object_map() {
   {
-    RWLock::WLocker image_locker(m_image_ctx.image_lock);
+    std::unique_lock image_locker{m_image_ctx.image_lock};
     std::swap(m_object_map, m_image_ctx.object_map);
   }
 
@@ -262,7 +299,7 @@ void PreReleaseRequest<I>::send_close_object_map() {
 
   using klass = PreReleaseRequest<I>;
   Context *ctx = create_context_callback<
-    klass, &klass::handle_close_object_map>(this);
+    klass, &klass::handle_close_object_map>(this, m_object_map);
   m_object_map->close(ctx);
 }
 
@@ -274,8 +311,8 @@ void PreReleaseRequest<I>::handle_close_object_map(int r) {
   if (r < 0) {
     lderr(cct) << "failed to close object map: " << cpp_strerror(r) << dendl;
   }
+  m_object_map->put();
 
-  delete m_object_map;
   send_unlock();
 }
 

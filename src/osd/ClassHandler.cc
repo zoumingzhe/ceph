@@ -5,8 +5,7 @@
 #include "ClassHandler.h"
 #include "common/errno.h"
 #include "common/ceph_context.h"
-
-#include <dlfcn.h>
+#include "include/dlfcn_compat.h"
 
 #include <map>
 
@@ -23,7 +22,13 @@
 
 
 #define CLS_PREFIX "libcls_"
-#define CLS_SUFFIX ".so"
+#define CLS_SUFFIX SHARED_LIB_SUFFIX
+
+using std::map;
+using std::set;
+using std::string;
+
+using ceph::bufferlist;
 
 
 int ClassHandler::open_class(const string& cname, ClassData **pcls)
@@ -121,7 +126,7 @@ ClassHandler::ClassData *ClassHandler::_get_class(const string& cname,
     ldout(cct, 10) << "_get_class adding new class name " << cname << " " << cls << dendl;
     cls->name = cname;
     cls->handler = this;
-    cls->whitelisted = in_class_list(cname, cct->_conf->osd_class_default_list);
+    cls->allowed = in_class_list(cname, cct->_conf->osd_class_default_list);
   }
   return cls;
 }
@@ -257,15 +262,17 @@ ClassHandler::ClassFilter *ClassHandler::ClassData::register_cxx_filter(
   return &filter;
 }
 
-ClassHandler::ClassMethod *ClassHandler::ClassData::_get_method(const char *mname)
+ClassHandler::ClassMethod *ClassHandler::ClassData::_get_method(
+    const std::string& mname)
 {
-  map<string, ClassHandler::ClassMethod>::iterator iter = methods_map.find(mname);
-  if (iter == methods_map.end())
-    return NULL;
-  return &(iter->second);
+  if (auto iter = methods_map.find(mname); iter != methods_map.end()) {
+    return &(iter->second);
+  } else {
+    return nullptr;
+  }
 }
 
-int ClassHandler::ClassData::get_method_flags(const char *mname)
+int ClassHandler::ClassData::get_method_flags(const std::string& mname)
 {
   std::lock_guard l(handler->mutex);
   ClassMethod *method = _get_method(mname);
@@ -317,7 +324,7 @@ int ClassHandler::ClassMethod::exec(cls_method_context_t ctx, bufferlist& indata
       ret = method(ctx, indata.c_str(), indata.length(), &out, &olen);
       if (out) {
         // assume *out was allocated via cls_alloc (which calls malloc!)
-        buffer::ptr bp = buffer::claim_malloc(olen, out);
+	ceph::buffer::ptr bp = ceph::buffer::claim_malloc(olen, out);
         outdata.push_back(bp);
       }
     } else {
@@ -327,3 +334,17 @@ int ClassHandler::ClassMethod::exec(cls_method_context_t ctx, bufferlist& indata
   return ret;
 }
 
+ClassHandler& ClassHandler::get_instance()
+{
+#ifdef WITH_SEASTAR
+  // the context is being used solely for:
+  //   1. random number generation (cls_gen_random_bytes)
+  //   2. accessing the configuration
+  //   3. logging
+  static CephContext cct;
+  static ClassHandler single(&cct);
+#else
+  static ClassHandler single(g_ceph_context);
+#endif // WITH_SEASTAR
+  return single;
+}

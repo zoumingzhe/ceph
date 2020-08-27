@@ -33,12 +33,15 @@ and major events. ::
 Execute the following to show the monitor quorum, including which monitors are
 participating and which one is the leader. ::
 
+	ceph mon stat
 	ceph quorum_status
 
 Execute the following to query the status of a single monitor, including whether
 or not it is in the quorum. ::
 
-	ceph [-m monhost] mon_status
+	ceph tell mon.[id] mon_status
+
+where the value of ``[id]`` can be determined, e.g., from ``ceph -s``.
 
 
 Authentication Subsystem
@@ -60,7 +63,7 @@ To display the statistics for all placement groups, execute the following::
 
 	ceph pg dump [--format {format}]
 
-The valid formats are ``plain`` (default) and ``json``.
+The valid formats are ``plain`` (default), ``json`` ``json-pretty``, ``xml``, and ``xml-pretty``.
 
 To display the statistics for all placement groups stuck in a specified state, 
 execute the following:: 
@@ -68,7 +71,7 @@ execute the following::
 	ceph pg dump_stuck inactive|unclean|stale|undersized|degraded [--format {format}] [-t|--threshold {seconds}]
 
 
-``--format`` may be ``plain`` (default) or ``json``
+``--format`` may be ``plain`` (default), ``json``, ``json-pretty``, ``xml``, or ``xml-pretty``.
 
 ``--threshold`` defines how many seconds "stuck" is (default: 300)
 
@@ -105,13 +108,14 @@ file. ::
 
 	ceph osd getcrushmap -o file
 
-The foregoing functionally equivalent to ::
+The foregoing is functionally equivalent to ::
 
 	ceph osd getmap -o /tmp/osdmap
 	osdmaptool /tmp/osdmap --export-crush file
 
-Dump the OSD map. Valid formats for ``-f`` are ``plain`` and ``json``. If no
-``--format`` option is given, the OSD map is dumped as plain text. ::
+Dump the OSD map. Valid formats for ``-f`` are ``plain``, ``json``, ``json-pretty``,
+``xml``, and ``xml-pretty``. If no ``--format`` option is given, the OSD map is 
+dumped as plain text. ::
 
 	ceph osd dump [--format {format}]
 
@@ -233,18 +237,18 @@ Deployments utilizing Nautilus (or later revisions of Luminous and Mimic)
 that have no pre-Luminous cients may instead wish to instead enable the
 `balancer`` module for ``ceph-mgr``.
 
-Add/remove an IP address to/from the blacklist. When adding an address,
-you can specify how long it should be blacklisted in seconds; otherwise,
-it will default to 1 hour. A blacklisted address is prevented from
-connecting to any OSD. Blacklisting is most often used to prevent a
+Add/remove an IP address to/from the blocklist. When adding an address,
+you can specify how long it should be blocklisted in seconds; otherwise,
+it will default to 1 hour. A blocklisted address is prevented from
+connecting to any OSD. Blocklisting is most often used to prevent a
 lagging metadata server from making bad changes to data on the OSDs.
 
 These commands are mostly only useful for failure testing, as
-blacklists are normally maintained automatically and shouldn't need
+blocklists are normally maintained automatically and shouldn't need
 manual intervention. ::
 
-	ceph osd blacklist add ADDRESS[:source_port] [TIME]
-	ceph osd blacklist rm ADDRESS[:source_port]
+	ceph osd blocklist add ADDRESS[:source_port] [TIME]
+	ceph osd blocklist rm ADDRESS[:source_port]
 
 Creates/deletes a snapshot of a pool. ::
 
@@ -253,7 +257,7 @@ Creates/deletes a snapshot of a pool. ::
 
 Creates/deletes/renames a storage pool. ::
 
-	ceph osd pool create {pool-name} pg_num [pgp_num]
+	ceph osd pool create {pool-name} [pg_num [pgp_num]]
 	ceph osd pool delete {pool-name} [{pool-name} --yes-i-really-really-mean-it]
 	ceph osd pool rename {old-name} {new-name}
 
@@ -395,13 +399,12 @@ This is also available more directly::
 
 The above will block until a quorum is reached.
 
-For a status of just the monitor you connect to (use ``-m HOST:PORT``
-to select)::
+For a status of just a single monitor::
 
-	ceph mon_status -f json-pretty
+	ceph tell mon.[name] mon_status
 	
-	
-.. code-block:: javascript
+where the value of ``[name]`` can be taken from ``ceph quorum_status``. Sample
+output::
 	
 	{
 	    "name": "b",

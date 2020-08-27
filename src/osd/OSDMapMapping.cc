@@ -8,6 +8,8 @@
 
 #include "common/debug.h"
 
+using std::vector;
+
 MEMPOOL_DEFINE_OBJECT_FACTORY(OSDMapMapping, osdmapmapping,
 			      osdmap_mapping);
 
@@ -135,7 +137,7 @@ void ParallelPGMapper::Job::finish_one()
 	finish = ceph_clock_now();
 	complete();
       }
-      cond.Signal();
+      cond.notify_all();
       fin = onfinish;
       onfinish = nullptr;
     }

@@ -22,15 +22,16 @@
 #include <vector>
 #include <list>
 #include <mutex>
-#include <atomic>
 #include <typeinfo>
 #include <boost/container/flat_set.hpp>
 #include <boost/container/flat_map.hpp>
 
-#include <common/Formatter.h>
+#include "common/Formatter.h"
+#include "common/ceph_atomic.h"
 #include "include/ceph_assert.h"
 #include "include/compact_map.h"
 #include "include/compact_set.h"
+#include "include/compat.h"
 
 
 /*
@@ -150,12 +151,20 @@ namespace mempool {
   f(bluestore_alloc)		      \
   f(bluestore_cache_data)	      \
   f(bluestore_cache_onode)	      \
+  f(bluestore_cache_meta)	      \
   f(bluestore_cache_other)	      \
+  f(bluestore_Buffer)		      \
+  f(bluestore_Extent)		      \
+  f(bluestore_Blob)		      \
+  f(bluestore_SharedBlob)	      \
+  f(bluestore_inline_bl)	      \
   f(bluestore_fsck)		      \
   f(bluestore_txc)		      \
-  f(bluestore_writing_deferred)	      \
+  f(bluestore_writing_deferred)      \
   f(bluestore_writing)		      \
   f(bluefs)			      \
+  f(bluefs_file_reader)              \
+  f(bluefs_file_writer)              \
   f(buffer_anon)		      \
   f(buffer_meta)		      \
   f(osd)			      \
@@ -194,9 +203,9 @@ enum {
 
 // align shard to a cacheline
 struct shard_t {
-  std::atomic<size_t> bytes = {0};
-  std::atomic<size_t> items = {0};
-  char __padding[128 - sizeof(std::atomic<size_t>)*2];
+  ceph::atomic<size_t> bytes = {0};
+  ceph::atomic<size_t> items = {0};
+  char __padding[128 - sizeof(ceph::atomic<size_t>)*2];
 } __attribute__ ((aligned (128)));
 
 static_assert(sizeof(shard_t) == 128, "shard_t should be cacheline-sized");
@@ -222,7 +231,7 @@ const char *get_pool_name(pool_index_t ix);
 struct type_t {
   const char *type_name;
   size_t item_size;
-  std::atomic<ssize_t> items = {0};  // signed
+  ceph::atomic<ssize_t> items = {0};  // signed
 };
 
 struct type_info_hash {

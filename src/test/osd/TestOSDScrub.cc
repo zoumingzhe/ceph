@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <signal.h>
 #include <gtest/gtest.h>
+#include "common/async/context_pool.h"
 #include "osd/OSD.h"
 #include "os/ObjectStore.h"
 #include "mon/MonClient.h"
@@ -41,8 +42,9 @@ public:
       Messenger *hb_front_server,
       Messenger *hb_back_server,
       Messenger *osdc_messenger,
-      MonClient *mc, const std::string &dev, const std::string &jdev) :
-      OSD(cct_, store_, id, internal, external, hb_front_client, hb_back_client, hb_front_server, hb_back_server, osdc_messenger, mc, dev, jdev)
+      MonClient *mc, const std::string &dev, const std::string &jdev,
+      ceph::async::io_context_pool& ictx) :
+      OSD(cct_, store_, id, internal, external, hb_front_client, hb_back_client, hb_front_server, hb_back_server, osdc_messenger, mc, dev, jdev, ictx)
   {
   }
 
@@ -52,6 +54,7 @@ public:
 };
 
 TEST(TestOSDScrub, scrub_time_permit) {
+  ceph::async::io_context_pool icp(1);
   ObjectStore *store = ObjectStore::create(g_ceph_context,
              g_conf()->osd_objectstore,
              g_conf()->osd_data,
@@ -63,14 +66,15 @@ TEST(TestOSDScrub, scrub_time_permit) {
   ms->set_cluster_protocol(CEPH_OSD_PROTOCOL);
   ms->set_default_policy(Messenger::Policy::stateless_server(0));
   ms->bind(g_conf()->public_addr);
-  MonClient mc(g_ceph_context);
+  MonClient mc(g_ceph_context, icp);
   mc.build_initial_monmap();
-  TestOSDScrub* osd = new TestOSDScrub(g_ceph_context, store, 0, ms, ms, ms, ms, ms, ms, ms, &mc, "", "");
+  TestOSDScrub* osd = new TestOSDScrub(g_ceph_context, store, 0, ms, ms, ms, ms, ms, ms, ms, &mc, "", "", icp);
 
   g_ceph_context->_conf.set_val("osd_scrub_begin_hour", "0");
   g_ceph_context->_conf.set_val("osd_scrub_end_hour", "24");
   g_ceph_context->_conf.apply_changes(nullptr);
   tm tm;
+  tm.tm_isdst = -1;
   strptime("2015-01-16 12:05:13", "%Y-%m-%d %H:%M:%S", &tm);
   utime_t now = utime_t(mktime(&tm), 0);
   bool ret = osd->scrub_time_permit(now);

@@ -12,7 +12,7 @@ describe('PgCategoryService', () => {
   });
 
   beforeEach(() => {
-    service = TestBed.get(PgCategoryService);
+    service = TestBed.inject(PgCategoryService);
   });
 
   it('should be created', () => {
@@ -26,7 +26,7 @@ describe('PgCategoryService', () => {
   });
 
   describe('getTypeByStates', () => {
-    const testMethod = (value, expected) =>
+    const testMethod = (value: string, expected: string) =>
       expect(service.getTypeByStates(value)).toEqual(expected);
 
     it(PgCategory.CATEGORY_CLEAN, () => {

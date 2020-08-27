@@ -28,12 +28,10 @@ class ConnectedSocketImpl {
   virtual ~ConnectedSocketImpl() {}
   virtual int is_connected() = 0;
   virtual ssize_t read(char*, size_t) = 0;
-  virtual ssize_t zero_copy_read(bufferptr&) = 0;
-  virtual ssize_t send(bufferlist &bl, bool more) = 0;
+  virtual ssize_t send(ceph::buffer::list &bl, bool more) = 0;
   virtual void shutdown() = 0;
   virtual void close() = 0;
   virtual int fd() const = 0;
-  virtual int socket_fd() const = 0;
 };
 
 class ConnectedSocket;
@@ -95,16 +93,10 @@ class ConnectedSocket {
   ssize_t read(char* buf, size_t len) {
     return _csi->read(buf, len);
   }
-  /// Gets the input stream.
-  ///
-  /// Gets an object returning data sent from the remote endpoint.
-  ssize_t zero_copy_read(bufferptr &data) {
-    return _csi->zero_copy_read(data);
-  }
   /// Gets the output stream.
   ///
   /// Gets an object that sends data to the remote endpoint.
-  ssize_t send(bufferlist &bl, bool more) {
+  ssize_t send(ceph::buffer::list &bl, bool more) {
     return _csi->send(bl, more);
   }
   /// Disables output to the socket.
@@ -129,9 +121,6 @@ class ConnectedSocket {
   /// Get file descriptor
   int fd() const {
     return _csi->fd();
-  }
-  int socket_fd() const {
-    return _csi->socket_fd();
   }
 
   explicit operator bool() const {
@@ -235,8 +224,8 @@ class Worker {
   Worker(const Worker&) = delete;
   Worker& operator=(const Worker&) = delete;
 
-  Worker(CephContext *c, unsigned i)
-    : cct(c), perf_logger(NULL), id(i), references(0), center(c) {
+  Worker(CephContext *c, unsigned worker_id)
+    : cct(c), perf_logger(NULL), id(worker_id), references(0), center(c) {
     char name[128];
     sprintf(name, "AsyncMessenger::Worker-%u", id);
     // initialize perf_logger
@@ -313,9 +302,9 @@ class NetworkStack {
 
  protected:
   CephContext *cct;
-  vector<Worker*> workers;
+  std::vector<Worker*> workers;
 
-  explicit NetworkStack(CephContext *c, const string &t);
+  explicit NetworkStack(CephContext *c, const std::string &t);
  public:
   NetworkStack(const NetworkStack &) = delete;
   NetworkStack& operator=(const NetworkStack &) = delete;
@@ -325,12 +314,10 @@ class NetworkStack {
   }
 
   static std::shared_ptr<NetworkStack> create(
-          CephContext *c, const string &type);
+    CephContext *c, const std::string &type);
 
   static Worker* create_worker(
-          CephContext *c, const string &t, unsigned i);
-  // backend need to override this method if supports zero copy read
-  virtual bool support_zero_copy_read() const { return false; }
+    CephContext *c, const std::string &t, unsigned i);
   // backend need to override this method if backend doesn't support shared
   // listen table.
   // For example, posix backend has in kernel global listen table. If one
@@ -343,8 +330,8 @@ class NetworkStack {
   void start();
   void stop();
   virtual Worker *get_worker();
-  Worker *get_worker(unsigned i) {
-    return workers[i];
+  Worker *get_worker(unsigned worker_id) {
+    return workers[worker_id];
   }
   void drain();
   unsigned get_num_worker() const {

@@ -6,8 +6,7 @@
 #include "librbd/cache/ObjectCacherWriteback.h"
 #include "common/ceph_context.h"
 #include "common/dout.h"
-#include "common/Mutex.h"
-#include "common/WorkQueue.h"
+#include "common/ceph_mutex.h"
 #include "osdc/Striper.h"
 #include "include/Context.h"
 #include "include/rados/librados.hpp"
@@ -19,9 +18,10 @@
 #include "librbd/ObjectMap.h"
 #include "librbd/Journal.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
 #include "librbd/io/AioCompletion.h"
 #include "librbd/io/ObjectDispatchSpec.h"
-#include "librbd/io/ObjectDispatcher.h"
+#include "librbd/io/ObjectDispatcherInterface.h"
 #include "librbd/io/ReadResult.h"
 
 #include "include/ceph_assert.h"
@@ -42,13 +42,13 @@ namespace cache {
  */
 class C_ReadRequest : public Context {
 public:
-  C_ReadRequest(CephContext *cct, Context *c, Mutex *cache_lock)
+  C_ReadRequest(CephContext *cct, Context *c, ceph::mutex *cache_lock)
     : m_cct(cct), m_ctx(c), m_cache_lock(cache_lock) {
   }
   void finish(int r) override {
     ldout(m_cct, 20) << "aio_cb completing " << dendl;
     {
-      Mutex::Locker cache_locker(*m_cache_lock);
+      std::lock_guard cache_locker{*m_cache_lock};
       m_ctx->complete(r);
     }
     ldout(m_cct, 20) << "aio_cb finished" << dendl;
@@ -56,7 +56,7 @@ public:
 private:
   CephContext *m_cct;
   Context *m_ctx;
-  Mutex *m_cache_lock;
+  ceph::mutex *m_cache_lock;
 };
 
 class C_OrderedWrite : public Context {
@@ -69,7 +69,7 @@ public:
   void finish(int r) override {
     ldout(m_cct, 20) << "C_OrderedWrite completing " << m_result << dendl;
     {
-      Mutex::Locker l(m_wb_handler->m_lock);
+      std::lock_guard l{m_wb_handler->m_lock};
       ceph_assert(!m_result->done);
       m_result->done = true;
       m_result->ret = r;
@@ -105,7 +105,7 @@ struct C_CommitIOEventExtent : public Context {
   }
 };
 
-ObjectCacherWriteback::ObjectCacherWriteback(ImageCtx *ictx, Mutex& lock)
+ObjectCacherWriteback::ObjectCacherWriteback(ImageCtx *ictx, ceph::mutex& lock)
   : m_tid(0), m_lock(lock), m_ictx(ictx) {
 }
 
@@ -137,8 +137,8 @@ void ObjectCacherWriteback::read(const object_t& oid, uint64_t object_no,
     aio_comp, off, len, {{0, len}});
 
   auto req = io::ObjectDispatchSpec::create_read(
-    m_ictx, io::OBJECT_DISPATCH_LAYER_CACHE, object_no, off, len, snapid,
-    op_flags, trace, &req_comp->bl, &req_comp->extent_map, req_comp);
+    m_ictx, io::OBJECT_DISPATCH_LAYER_CACHE, object_no, {{off, len}}, snapid,
+    op_flags, trace, &req_comp->bl, &req_comp->extent_map, nullptr, req_comp);
   req->send();
 }
 
@@ -147,11 +147,11 @@ bool ObjectCacherWriteback::may_copy_on_write(const object_t& oid,
                                               uint64_t read_len,
                                               snapid_t snapid)
 {
-  m_ictx->image_lock.get_read();
+  m_ictx->image_lock.lock_shared();
   librados::snap_t snap_id = m_ictx->snap_id;
   uint64_t overlap = 0;
   m_ictx->get_parent_overlap(snap_id, &overlap);
-  m_ictx->image_lock.put_read();
+  m_ictx->image_lock.unlock_shared();
 
   uint64_t object_no = oid_to_object_no(oid.name, m_ictx->object_prefix);
 
@@ -197,7 +197,7 @@ ceph_tid_t ObjectCacherWriteback::write(const object_t& oid,
 
   auto req = io::ObjectDispatchSpec::create_write(
     m_ictx, io::OBJECT_DISPATCH_LAYER_CACHE, object_no, off, std::move(bl_copy),
-    snapc, 0, journal_tid, trace, ctx);
+    snapc, 0, 0, std::nullopt, journal_tid, trace, ctx);
   req->object_dispatch_flags = (
     io::OBJECT_DISPATCH_FLAG_FLUSH |
     io::OBJECT_DISPATCH_FLAG_WILL_RETRY_ON_ERROR);
@@ -244,7 +244,7 @@ void ObjectCacherWriteback::overwrite_extent(const object_t& oid, uint64_t off,
 
 void ObjectCacherWriteback::complete_writes(const std::string& oid)
 {
-  ceph_assert(m_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(m_lock));
   std::queue<write_result_d*>& results = m_writes[oid];
   ldout(m_ictx->cct, 20) << "complete_writes() oid " << oid << dendl;
   std::list<write_result_d*> finished;

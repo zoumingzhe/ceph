@@ -12,10 +12,12 @@ port=$2
 
 ##
 
+[ -z "$BUILD_DIR" ] && BUILD_DIR=build
+
 if [ -e CMakeCache.txt ]; then
     BIN_PATH=$PWD/bin
-elif [ -e $root_path/../build/CMakeCache.txt ]; then
-    cd $root_path/../build
+elif [ -e $root_path/../${BUILD_DIR}/CMakeCache.txt ]; then
+    cd $root_path/../${BUILD_DIR}
     BIN_PATH=$PWD/bin
 fi
 PATH=$PATH:$BIN_PATH
@@ -28,9 +30,9 @@ cd $dir
 git clone https://github.com/ceph/s3-tests
 cd s3-tests
 git checkout ceph-$branch
-VIRTUALENV_PYTHON=/usr/bin/python2 ./bootstrap
+VIRTUALENV_PYTHON=/usr/bin/python3 ./bootstrap
 
-S3TEST_CONF=s3tests.conf.SAMPLE virtualenv/bin/nosetests -a '!fails_on_rgw,!lifecycle_expiration,!fails_strict_rfc2616' -v
+S3TEST_CONF=s3tests.conf.SAMPLE virtualenv/bin/python -m nose -a '!fails_on_rgw,!lifecycle_expiration,!fails_strict_rfc2616' -v
 
 cd ../..
 rm -rf $dir

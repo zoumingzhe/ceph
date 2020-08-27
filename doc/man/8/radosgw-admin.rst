@@ -35,6 +35,9 @@ which are as follows:
   Display information of a user, and any potentially available
   subusers and keys.
 
+:command:`user rename`
+  Renames a user.
+
 :command:`user rm`
   Remove a user.
 
@@ -89,6 +92,10 @@ which are as follows:
 :command:`bucket unlink`
   Unlink bucket from specified user.
 
+:command:`bucket chown`
+  Link bucket to specified user and update object ACLs. 
+  Use --marker to resume if command gets interrupted.
+
 :command:`bucket stats`
   Returns bucket statistics.
 
@@ -100,6 +107,11 @@ which are as follows:
 
 :command:`bucket rewrite`
   Rewrite all objects in the specified bucket.
+
+:command:`bucket radoslist`
+  List the rados objects that contain the data for all objects is
+  the designated bucket, if --bucket=<bucket> is specified, or
+  otherwise all buckets.
 
 :command:`bucket reshard`
   Reshard a bucket.
@@ -392,13 +404,16 @@ which are as follows:
   Read data log status.
 
 :command:`orphans find`
-  Init and run search for leaked rados objects
+  Init and run search for leaked rados objects.
+  DEPRECATED. See the "rgw-orphan-list" tool.
 
 :command:`orphans finish`
-  Clean up search for leaked rados objects
+  Clean up search for leaked rados objects.
+  DEPRECATED. See the "rgw-orphan-list" tool.
 
 :command:`orphans list-jobs`
   List the current job-ids for the orphans search.
+  DEPRECATED. See the "rgw-orphan-list" tool.
 
 :command:`role create`
   create a new AWS role for use with STS.
@@ -442,6 +457,28 @@ which are as follows:
 :command:`reshard cancel`
   Cancel resharding a bucket
 
+:command:`topic list`
+  List bucket notifications/pubsub topics                                                   
+
+:command:`topic get`
+  Get a bucket notifications/pubsub topic                                                   
+  
+:command:`topic rm`
+  Remove a bucket notifications/pubsub topic                                                
+
+:command:`subscription get`
+  Get a pubsub subscription definition
+
+:command:`subscription rm`
+  Remove a pubsub subscription
+
+:command:`subscription pull`
+  Show events in a pubsub subscription
+             
+:command:`subscription ack`
+  Ack (remove) an events in a pubsub subscription
+
+
 Options
 =======
 
@@ -462,6 +499,10 @@ Options
 .. option:: --uid=uid
 
    The radosgw user ID.
+
+.. option:: --new-uid=uid
+
+   ID of the new user. Used with 'user rename' command.
 
 .. option:: --subuser=<name>
 
@@ -517,9 +558,10 @@ Options
 
    Set the system flag on the user.
 
-.. option:: --bucket=bucket
+.. option:: --bucket=[tenant-id/]bucket
 
-   Specify the bucket name.
+   Specify the bucket name.  If tenant-id is not specified, the tenant-id
+   of the user (--uid) is used.
 
 .. option:: --pool=<pool>
 
@@ -546,9 +588,15 @@ Options
 
    Specify the bucket id.
 
+.. option:: --bucket-new-name=[tenant-id/]<bucket>
+
+   Optional for `bucket link`; use to rename a bucket.
+        While tenant-id/ can be specified, this is never
+        necessary for normal operation.
+
 .. option:: --shard-id=<shard-id>
 
-	Optional for mdlog list, data sync status. Required for ``mdlog trim``.
+	Optional for mdlog list, bi list, data sync status. Required for ``mdlog trim``.
 
 .. option:: --max-entries=<entries>
 
@@ -710,6 +758,13 @@ Options
 
    Remove the zones from list of zones to sync from.
 
+.. option:: --bucket-index-max-shards
+
+   Override a zone's or zonegroup's default number of bucket index shards. This
+   option is accepted by the 'zone create', 'zone modify', 'zonegroup add',
+   and 'zonegroup modify' commands, and applies to buckets that are created
+   after the zone/zonegroup changes take effect.
+
 .. option:: --fix
 
 	Besides checking bucket index, will also fix it.
@@ -789,6 +844,13 @@ Options
    When specified with bucket deletion and bypass-gc set to true,
    ignores bucket index consistency.
 
+.. option:: --max-concurrent-ios
+
+        Maximum concurrent ios for bucket operations. Affects operations that
+        scan the bucket index, e.g., listing, deletion, and all scan/search
+        operations such as finding orphans or checking the bucket index.
+        Default is 32.
+
 Quota Options
 =============
 
@@ -820,11 +882,6 @@ Orphans Search Options
 .. option:: --job-id
 
         Set the job id (for orphans find)
-
-.. option:: --max-concurrent-ios
-
-        Maximum concurrent ios for orphans find.
-        Default is 32.
 
 
 Orphans list-jobs options
@@ -863,6 +920,22 @@ Role Options
 
    The path prefix for filtering the roles.
 
+
+Bucket Notifications/PubSub Options
+===================================
+.. option:: --topic                   
+
+   The bucket notifications/pubsub topic name.
+
+.. option:: --subscription
+
+   The pubsub subscription name.
+
+.. option:: --event-id
+
+   The event id in a pubsub subscription.
+
+
 Examples
 ========
 
@@ -884,6 +957,10 @@ Generate a new user::
 Remove a user::
 
         $ radosgw-admin user rm --uid=johnny
+
+Rename a user::
+
+        $ radosgw-admin user rename --uid=johny --new-uid=joe
         
 Remove a user and all associated buckets with their contents::
 
@@ -900,6 +977,18 @@ Link bucket to specified user::
 Unlink bucket from specified user::
 
         $ radosgw-admin bucket unlink --bucket=foo --uid=johnny
+
+Rename a bucket::
+
+        $ radosgw-admin bucket link --bucket=foo --bucket-new-name=bar --uid=johnny
+
+Move a bucket from the old global tenant space to a specified tenant::
+
+        $ radosgw-admin bucket link --bucket=/foo --uid=12345678$12345678'
+
+Link bucket to specified user and change object ACLs::
+
+        $ radosgw-admin bucket chown --bucket=/foo --uid=12345678$12345678'
 
 Show the logs of a bucket from April 1st, 2012::
 

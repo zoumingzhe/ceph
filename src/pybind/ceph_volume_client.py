@@ -27,9 +27,11 @@ def to_bytes(param):
     Helper method that returns byte representation of the given parameter.
     '''
     if isinstance(param, str):
-        return param.encode()
+        return param.encode('utf-8')
+    elif param is None:
+        return param
     else:
-        return str(param).encode()
+        return str(param).encode('utf-8')
 
 class RadosError(Exception):
     """
@@ -353,7 +355,7 @@ class CephFSVolumeClient(object):
                 continue
 
             (group_id, volume_id) = volume.split('/')
-            group_id = group_id if group_id is not 'None' else None
+            group_id = group_id if group_id != 'None' else None
             volume_path = VolumePath(group_id, volume_id)
             access_level = volume_data['access_level']
 
@@ -376,7 +378,7 @@ class CephFSVolumeClient(object):
                 if vol_meta['auths'][auth_id] == want_auth:
                     continue
 
-                readonly = True if access_level is 'r' else False
+                readonly = access_level == 'r'
                 self._authorize_volume(volume_path, auth_id, readonly)
 
             # Recovered from partial auth updates for the auth ID's access
@@ -476,7 +478,7 @@ class CephFSVolumeClient(object):
             self.evict(premount_evict)
             log.debug("Premount eviction of {0} completes".format(premount_evict))
         log.debug("CephFS mounting...")
-        self.fs.mount(filesystem_name=self.fs_name)
+        self.fs.mount(filesystem_name=to_bytes(self.fs_name))
         log.debug("Connection to cephfs complete")
 
         # Recover from partial auth updates due to a previous
@@ -561,31 +563,10 @@ class CephFSVolumeClient(object):
             log.info("Pool {0} already exists".format(pool_name))
             return existing_id
 
-        osd_count = len(osd_map['osds'])
-
-        # We can't query the actual cluster config remotely, but since this is
-        # just a heuristic we'll assume that the ceph.conf we have locally reflects
-        # that in use in the rest of the cluster.
-        pg_warn_max_per_osd = int(self.rados.conf_get('mon_max_pg_per_osd'))
-
-        other_pgs = 0
-        for pool in osd_map['pools']:
-            if not pool['pool_name'].startswith(self.POOL_PREFIX):
-                other_pgs += pool['pg_num']
-
-        # A basic heuristic for picking pg_num: work out the max number of
-        # PGs we can have without tripping a warning, then subtract the number
-        # of PGs already created by non-manila pools, then divide by ten.  That'll
-        # give you a reasonable result on a system where you have "a few" manila
-        # shares.
-        pg_num = ((pg_warn_max_per_osd * osd_count) - other_pgs) // 10
-        # TODO Alternatively, respect an override set by the user.
-
         self._rados_command(
             'osd pool create',
             {
                 'pool': pool_name,
-                'pg_num': int(pg_num),
             }
         )
 
@@ -1118,7 +1099,7 @@ class CephFSVolumeClient(object):
 
             # Construct auth caps that if present might conflict with the desired
             # auth caps.
-            unwanted_access_level = 'r' if want_access_level is 'rw' else 'rw'
+            unwanted_access_level = 'r' if want_access_level == 'rw' else 'rw'
             unwanted_mds_cap = 'allow {0} path={1}'.format(unwanted_access_level, path)
             if namespace:
                 unwanted_osd_cap = 'allow {0} pool={1} namespace={2}'.format(
@@ -1194,7 +1175,7 @@ class CephFSVolumeClient(object):
 
             volume_path_str = str(volume_path)
             if (auth_meta is None) or (not auth_meta['volumes']):
-                log.warn("deauthorized called for already-removed auth"
+                log.warning("deauthorized called for already-removed auth"
                          "ID '{auth_id}' for volume ID '{volume}'".format(
                     auth_id=auth_id, volume=volume_path.volume_id
                 ))
@@ -1203,7 +1184,7 @@ class CephFSVolumeClient(object):
                 return
 
             if volume_path_str not in auth_meta['volumes']:
-                log.warn("deauthorized called for already-removed auth"
+                log.warning("deauthorized called for already-removed auth"
                          "ID '{auth_id}' for volume ID '{volume}'".format(
                     auth_id=auth_id, volume=volume_path.volume_id
                 ))
@@ -1234,7 +1215,7 @@ class CephFSVolumeClient(object):
             vol_meta = self._volume_metadata_get(volume_path)
 
             if (vol_meta is None) or (auth_id not in vol_meta['auths']):
-                log.warn("deauthorized called for already-removed auth"
+                log.warning("deauthorized called for already-removed auth"
                          "ID '{auth_id}' for volume ID '{volume}'".format(
                     auth_id=auth_id, volume=volume_path.volume_id
                 ))
@@ -1408,7 +1389,7 @@ class CephFSVolumeClient(object):
         try:
             self.fs.rmdir(self._snapshot_path(dir_path, snapshot_name))
         except cephfs.ObjectNotFound:
-            log.warn("Snapshot was already gone: {0}".format(snapshot_name))
+            log.warning("Snapshot was already gone: {0}".format(snapshot_name))
 
     def create_snapshot_volume(self, volume_path, snapshot_name, mode=0o755):
         self._snapshot_create(self._get_path(volume_path), snapshot_name, mode)
@@ -1531,6 +1512,6 @@ class CephFSVolumeClient(object):
         try:
             ioctx.remove_object(object_name)
         except rados.ObjectNotFound:
-            log.warn("Object '{0}' was already removed".format(object_name))
+            log.warning("Object '{0}' was already removed".format(object_name))
         finally:
             ioctx.close()

@@ -7,7 +7,7 @@ import os
 import tempfile
 import sys
 
-from cStringIO import StringIO
+from io import StringIO
 from teuthology.orchestra import run
 from teuthology import misc as teuthology
 from teuthology import contextutil
@@ -15,6 +15,7 @@ from teuthology.parallel import parallel
 from teuthology.task.common_fs_utils import generic_mkfs
 from teuthology.task.common_fs_utils import generic_mount
 from teuthology.task.common_fs_utils import default_image_name
+
 
 #V1 image unsupported but required for testing purposes
 os.environ["RBD_FORCE_ALLOW_V1"] = "1"
@@ -63,7 +64,7 @@ def create_image(ctx, config):
                                                                  size=size))
         args = [
                 'adjust-ulimits',
-                'ceph-coverage'.format(tdir=testdir),
+                'ceph-coverage',
                 '{tdir}/archive/coverage'.format(tdir=testdir),
                 'rbd',
                 '-p', 'rbd',
@@ -138,7 +139,7 @@ def clone_image(ctx, config):
                     ('clone', parent_spec, name)]:
             args = [
                     'adjust-ulimits',
-                    'ceph-coverage'.format(tdir=testdir),
+                    'ceph-coverage',
                     '{tdir}/archive/coverage'.format(tdir=testdir),
                     'rbd', '-p', 'rbd'
                     ]
@@ -163,7 +164,7 @@ def clone_image(ctx, config):
                         ('snap', 'rm', parent_spec)]:
                 args = [
                         'adjust-ulimits',
-                        'ceph-coverage'.format(tdir=testdir),
+                        'ceph-coverage',
                         '{tdir}/archive/coverage'.format(tdir=testdir),
                         'rbd', '-p', 'rbd'
                         ]
@@ -346,16 +347,16 @@ def run_xfstests(ctx, config):
     with parallel() as p:
         for role, properties in config.items():
             p.spawn(run_xfstests_one_client, ctx, role, properties)
-        exc_info = None
+        exc = None
         while True:
             try:
                 p.next()
             except StopIteration:
                 break
             except:
-                exc_info = sys.exc_info()
-        if exc_info:
-            raise exc_info[0], exc_info[1], exc_info[2]
+                exc = sys.exc_info()[1]
+        if exc is not None:
+            raise exc
     yield
 
 def run_xfstests_one_client(ctx, role, properties):
@@ -411,9 +412,10 @@ def run_xfstests_one_client(ctx, role, properties):
         log.info('         randomize: {randomize}'.format(randomize=randomize))
 
         if exclude_list:
-            with tempfile.NamedTemporaryFile(bufsize=0, prefix='exclude') as exclude_file:
+            with tempfile.NamedTemporaryFile(mode='w', prefix='exclude') as exclude_file:
                 for test in exclude_list:
                     exclude_file.write("{}\n".format(test))
+                exclude_file.flush()
                 remote.put_file(exclude_file.name, exclude_file.name)
 
         # Note that the device paths are interpreted using
@@ -605,7 +607,7 @@ def task(ctx, config):
         norm_config = teuthology.replace_all_with_clients(ctx.cluster, config)
     if isinstance(norm_config, dict):
         role_images = {}
-        for role, properties in norm_config.iteritems():
+        for role, properties in norm_config.items():
             if properties is None:
                 properties = {}
             role_images[role] = properties.get('image_name')

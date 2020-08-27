@@ -1,8 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
-#ifndef CEPH_RGW_REST_CLIENT_H
-#define CEPH_RGW_REST_CLIENT_H
+#pragma once
 
 #include "rgw_http_client.h"
 
@@ -100,8 +99,10 @@ public:
     class ReceiveCB;
 
 private:
-  Mutex lock;
-  Mutex write_lock;
+  ceph::mutex lock =
+    ceph::make_mutex("RGWHTTPStreamRWRequest");
+  ceph::mutex write_lock =
+    ceph::make_mutex("RGWHTTPStreamRWRequest::write_lock");
   ReceiveCB *cb{nullptr};
   RGWWriteDrainCB *write_drain_cb{nullptr};
   bufferlist outbl;
@@ -132,12 +133,11 @@ public:
   };
 
   RGWHTTPStreamRWRequest(CephContext *_cct, const string& _method, const string& _url,
-                         param_vec_t *_headers, param_vec_t *_params) : RGWHTTPSimpleRequest(_cct, _method, _url, _headers, _params),
-                                                                        lock("RGWHTTPStreamRWRequest"), write_lock("RGWHTTPStreamRWRequest::write_lock") {
+                         param_vec_t *_headers, param_vec_t *_params) : RGWHTTPSimpleRequest(_cct, _method, _url, _headers, _params) {
   }
   RGWHTTPStreamRWRequest(CephContext *_cct, const string& _method, const string& _url, ReceiveCB *_cb,
                          param_vec_t *_headers, param_vec_t *_params) : RGWHTTPSimpleRequest(_cct, _method, _url, _headers, _params),
-                                                                        lock("RGWHTTPStreamRWRequest"), write_lock("RGWHTTPStreamRWRequest::write_lock"), cb(_cb) {
+									cb(_cb) {
   }
   virtual ~RGWHTTPStreamRWRequest() override {}
 
@@ -211,16 +211,13 @@ public:
                 out_cb(NULL), new_info(cct, &new_env), headers_gen(_cct, &new_env, &new_info) {}
   ~RGWRESTStreamS3PutObj() override;
 
-  void send_init(rgw_obj& obj);
+  void send_init(rgw::sal::RGWObject* obj);
   int send_ready(RGWAccessKey& key, map<string, bufferlist>& rgw_attrs, bool send);
   int send_ready(RGWAccessKey& key, const map<string, string>& http_attrs,
                  RGWAccessControlPolicy& policy, bool send);
   int send_ready(RGWAccessKey& key, bool send);
 
-  int put_obj_init(RGWAccessKey& key, rgw_obj& obj, uint64_t obj_size, map<string, bufferlist>& attrs, bool send);
+  int put_obj_init(RGWAccessKey& key, rgw::sal::RGWObject* obj, uint64_t obj_size, map<string, bufferlist>& attrs, bool send);
 
   RGWGetDataCB *get_out_cb() { return out_cb; }
 };
-
-#endif
-

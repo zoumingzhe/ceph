@@ -18,6 +18,8 @@
 
 #include "os/bluestore/BlueFS.h"
 #include "os/bluestore/BlueStore.h"
+#include "common/admin_socket.h"
+#include "kv/RocksDBStore.h"
 
 namespace po = boost::program_options;
 
@@ -191,7 +193,10 @@ void log_dump(
   const string& path,
   const vector<string>& devs)
 {
-  BlueFS* fs = open_bluefs(cct, path, devs);
+  validate_path(cct, path, true);
+  BlueFS *fs = new BlueFS(cct);
+
+  add_devices(fs, cct, devs);
   int r = fs->log_dump();
   if (r < 0) {
     cerr << "log_dump failed" << ": "
@@ -224,6 +229,10 @@ int main(int argc, char **argv)
   string action;
   string log_file;
   string key, value;
+  vector<string> allocs_name;
+  string empty_sharding(1, '\0');
+  string new_sharding = empty_sharding;
+  string resharding_ctrl;
   int log_level = 30;
   bool fsck_deep = false;
   po::options_description po_options("Options");
@@ -239,10 +248,31 @@ int main(int argc, char **argv)
     ("deep", po::value<bool>(&fsck_deep), "deep fsck (read all data)")
     ("key,k", po::value<string>(&key), "label metadata key name")
     ("value,v", po::value<string>(&value), "label metadata value")
+    ("allocator", po::value<vector<string>>(&allocs_name), "allocator to inspect: 'block'/'bluefs-wal'/'bluefs-db'/'bluefs-slow'")
+    ("sharding", po::value<string>(&new_sharding), "new sharding to apply")
+    ("resharding-ctrl", po::value<string>(&resharding_ctrl), "gives control over resharding procedure details")
     ;
   po::options_description po_positional("Positional options");
   po_positional.add_options()
-    ("command", po::value<string>(&action), "fsck, repair, bluefs-export, bluefs-bdev-sizes, bluefs-bdev-expand, bluefs-bdev-new-db, bluefs-bdev-new-wal, bluefs-bdev-migrate, show-label, set-label-key, rm-label-key, prime-osd-dir, bluefs-log-dump")
+    ("command", po::value<string>(&action),
+        "fsck, "
+        "repair, "
+        "quick-fix, "
+        "bluefs-export, "
+        "bluefs-bdev-sizes, "
+        "bluefs-bdev-expand, "
+        "bluefs-bdev-new-db, "
+        "bluefs-bdev-new-wal, "
+        "bluefs-bdev-migrate, "
+        "show-label, "
+        "set-label-key, "
+        "rm-label-key, "
+        "prime-osd-dir, "
+        "bluefs-log-dump, "
+        "free-dump, "
+        "free-score, "
+        "bluefs-stats, "
+        "reshard")
     ;
   po::options_description po_all("All options");
   po_all.add(po_options).add(po_positional);
@@ -275,7 +305,7 @@ int main(int argc, char **argv)
     exit(EXIT_FAILURE);
   }
 
-  if (action == "fsck" || action == "repair") {
+  if (action == "fsck" || action == "repair" || action == "quick-fix") {
     if (path.empty()) {
       cerr << "must specify bluestore path" << std::endl;
       exit(EXIT_FAILURE);
@@ -357,7 +387,34 @@ int main(int argc, char **argv)
       exit(EXIT_FAILURE);
     }
   }
-
+  if (action == "free-score" || action == "free-dump") {
+    if (path.empty()) {
+      cerr << "must specify bluestore path" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    for (auto name : allocs_name) {
+      if (!name.empty() &&
+          name != "block" &&
+          name != "bluefs-db" &&
+          name != "bluefs-wal" &&
+          name != "bluefs-slow") {
+        cerr << "unknown allocator '" << name << "'" << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+    if (allocs_name.empty())
+      allocs_name = vector<string>{"block", "bluefs-db", "bluefs-wal", "bluefs-slow"};
+  }
+  if (action == "reshard") {
+    if (path.empty()) {
+      cerr << "must specify bluestore path" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    if (new_sharding == empty_sharding) {
+      cerr << "must provide reshard specification" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  }
   vector<const char*> args;
   if (log_file.size()) {
     args.push_back("--log-file");
@@ -382,20 +439,23 @@ int main(int argc, char **argv)
   common_init_finish(cct.get());
 
   if (action == "fsck" ||
-      action == "repair") {
+      action == "repair" ||
+      action == "quick-fix") {
     validate_path(cct.get(), path, false);
     BlueStore bluestore(cct.get(), path);
     int r;
     if (action == "fsck") {
       r = bluestore.fsck(fsck_deep);
-    } else {
+    } else if (action == "repair") {
       r = bluestore.repair(fsck_deep);
+    } else {
+      r = bluestore.quick_fix();
     }
     if (r < 0) {
-      cerr << "error from fsck: " << cpp_strerror(r) << std::endl;
+      cerr << action << " failed: " << cpp_strerror(r) << std::endl;
       exit(EXIT_FAILURE);
     } else if (r > 0) {
-      cerr << action << " found " << r << " error(s)" << std::endl;
+      cerr << action << " status: remaining " << r << " error(s) and warning(s)" << std::endl;
       exit(EXIT_FAILURE);
     } else {
       cout << action << " success" << std::endl;
@@ -522,9 +582,8 @@ int main(int argc, char **argv)
     }
   }
   else if (action == "bluefs-bdev-sizes") {
-    BlueFS *fs = open_bluefs(cct.get(), path, devs);
-    fs->dump_block_extents(cout);
-    delete fs;
+    BlueStore bluestore(cct.get(), path);
+    bluestore.dump_bluefs_sizes(cout);
   }
   else if (action == "bluefs-bdev-expand") {
     BlueStore bluestore(cct.get(), path);
@@ -603,7 +662,7 @@ int main(int argc, char **argv)
 	  int left = size;
 	  while (left) {
 	    bufferlist bl;
-	    r = fs->read(h, &h->buf, pos, left, &bl, NULL);
+	    r = fs->read(h, pos, left, &bl, NULL);
 	    if (r <= 0) {
 	      cerr << "read " << dir << "/" << file << " from " << pos
 		   << " failed: " << cpp_strerror(r) << std::endl;
@@ -792,6 +851,106 @@ int main(int argc, char **argv)
       }
       return r;
     }
+  } else  if (action == "free-dump" || action == "free-score") {
+    AdminSocket *admin_socket = g_ceph_context->get_admin_socket();
+    ceph_assert(admin_socket);
+    std::string action_name = action == "free-dump" ? "dump" : "score";
+    validate_path(cct.get(), path, false);
+    BlueStore bluestore(cct.get(), path);
+    int r = bluestore.cold_open();
+    if (r < 0) {
+      cerr << "error from cold_open: " << cpp_strerror(r) << std::endl;
+      exit(EXIT_FAILURE);
+    }
+
+    for (auto alloc_name : allocs_name) {
+      ceph::bufferlist in, out;
+      ostringstream err;
+      int r = admin_socket->execute_command(
+	{"{\"prefix\": \"bluestore allocator " + action_name + " " + alloc_name + "\"}"},
+	in, err, &out);
+      if (r != 0) {
+        cerr << "failure querying '" << alloc_name << "'" << std::endl;
+        exit(EXIT_FAILURE);
+      }
+      cout << alloc_name << ":" << std::endl;
+      cout << std::string(out.c_str(),out.length()) << std::endl;
+    }
+
+    bluestore.cold_close();
+  } else  if (action == "bluefs-stats") {
+    AdminSocket* admin_socket = g_ceph_context->get_admin_socket();
+    ceph_assert(admin_socket);
+    validate_path(cct.get(), path, false);
+    BlueStore bluestore(cct.get(), path);
+    int r = bluestore.cold_open();
+    if (r < 0) {
+      cerr << "error from cold_open: " << cpp_strerror(r) << std::endl;
+      exit(EXIT_FAILURE);
+    }
+
+    ceph::bufferlist in, out;
+    ostringstream err;
+    r = admin_socket->execute_command(
+      { "{\"prefix\": \"bluefs stats\"}" },
+      in, err, &out);
+    if (r != 0) {
+      cerr << "failure querying bluefs stats: " << cpp_strerror(r) << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    cout << std::string(out.c_str(), out.length()) << std::endl;
+     bluestore.cold_close();
+  } else if (action == "reshard") {
+    auto get_ctrl = [&](size_t& val) {
+      if (!resharding_ctrl.empty()) {
+	size_t pos;
+	std::string token;
+	pos = resharding_ctrl.find('/');
+	token = resharding_ctrl.substr(0, pos);
+	if (pos != std::string::npos)
+	  resharding_ctrl.erase(0, pos + 1);
+	else
+	  resharding_ctrl.erase();
+	char* endptr;
+	val = strtoll(token.c_str(), &endptr, 0);
+	if (*endptr != '\0') {
+	  cerr << "invalid --resharding-ctrl. '" << token << "' is not a number" << std::endl;
+	  exit(EXIT_FAILURE);
+	}
+      }
+    };
+    BlueStore bluestore(cct.get(), path);
+    KeyValueDB *db_ptr;
+    RocksDBStore::resharding_ctrl ctrl;
+    if (!resharding_ctrl.empty()) {
+      get_ctrl(ctrl.bytes_per_iterator);
+      get_ctrl(ctrl.keys_per_iterator);
+      get_ctrl(ctrl.bytes_per_batch);
+      get_ctrl(ctrl.keys_per_batch);
+      if (!resharding_ctrl.empty()) {
+	cerr << "extra chars in --resharding-ctrl" << std::endl;
+	exit(EXIT_FAILURE);
+      }
+    }
+    int r = bluestore.open_db_environment(&db_ptr);
+    if (r < 0) {
+      cerr << "error preparing db environment: " << cpp_strerror(r) << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    if (r < 0) {
+      cerr << "error starting k-v inside bluestore: " << cpp_strerror(r) << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    RocksDBStore* rocks_db = dynamic_cast<RocksDBStore*>(db_ptr);
+    ceph_assert(db_ptr);
+    ceph_assert(rocks_db);
+    r = rocks_db->reshard(new_sharding, &ctrl);
+    if (r < 0) {
+      cerr << "error resharding: " << cpp_strerror(r) << std::endl;
+    } else {
+      cout << "reshard success" << std::endl;
+    }
+    bluestore.close_db_environment();
   } else {
     cerr << "unrecognized action " << action << std::endl;
     return 1;

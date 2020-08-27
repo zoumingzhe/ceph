@@ -5,10 +5,14 @@ meta:
    upgrade the client node
 tasks:
 - install:
+    exclude_packages:
+      - ceph-mgr-cephadm
+      - cephadm
+      - libcephfs-dev
     branch: nautilus
 - print: "**** done installing nautilus"
 - ceph:
-    log-whitelist:
+    log-ignorelist:
       - overall HEALTH_
       - \(FS_
       - \(MDS_
@@ -22,10 +26,13 @@ tasks:
       - Monitor daemon marked osd
       - Behind on trimming
       - Manager daemon
+      - Not found or unloadable
     conf:
       global:
         mon warn on pool no app: false
         bluestore_warn_on_legacy_statfs: false
+        bluestore warn on no per pool omap: false
+        mon pg warn min per osd: 0
 - exec:
     osd.0:
       - ceph osd set-require-min-compat-client nautilus
@@ -35,6 +42,9 @@ tasks:
     mon.b:
     mon.c:
 - print: "**** done install.upgrade non-client hosts"
+- rgw:
+   - client.1
+- print: "**** done => started rgw client.1"
 - parallel:
     - workload
     - upgrade-sequence

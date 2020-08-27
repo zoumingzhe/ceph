@@ -31,6 +31,25 @@
 #define DOUT_PREFIX_ARGS this
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, this)
+
+using std::dec;
+using std::hex;
+using std::list;
+using std::make_pair;
+using std::map;
+using std::pair;
+using std::ostream;
+using std::set;
+using std::string;
+using std::unique_ptr;
+using std::vector;
+
+using ceph::bufferhash;
+using ceph::bufferlist;
+using ceph::bufferptr;
+using ceph::ErasureCodeInterfaceRef;
+using ceph::Formatter;
+
 static ostream& _prefix(std::ostream *_dout, ECBackend *pgb) {
   return pgb->get_parent()->gen_dbg_prefix(*_dout);
 }
@@ -436,7 +455,7 @@ void ECBackend::handle_recovery_read_complete(
   for(map<pg_shard_t, bufferlist>::iterator i = to_read.get<2>().begin();
       i != to_read.get<2>().end();
       ++i) {
-    from[i->first.shard].claim(i->second);
+    from[i->first.shard] = std::move(i->second);
   }
   dout(10) << __func__ << ": " << from << dendl;
   int r;
@@ -491,10 +510,15 @@ struct SendPushReplies : public Context {
     replies.swap(in);
   }
   void finish(int) override {
+    std::vector<std::pair<int, Message*>> messages;
+    messages.reserve(replies.size());
     for (map<int, MOSDPGPushReply*>::iterator i = replies.begin();
 	 i != replies.end();
 	 ++i) {
-      l->send_message_osd_cluster(i->first, i->second, epoch);
+      messages.push_back(std::make_pair(i->first, i->second));
+    }
+    if (!messages.empty()) {
+      l->send_message_osd_cluster(messages, epoch);
     }
     replies.clear();
   }
@@ -803,7 +827,7 @@ bool ECBackend::_handle_message(
     return true;
   }
   case MSG_OSD_EC_READ: {
-    const MOSDECSubOpRead *op = static_cast<const MOSDECSubOpRead*>(_op->get_req());
+    auto op = _op->get_req<MOSDECSubOpRead>();
     MOSDECSubOpReadReply *reply = new MOSDECSubOpReadReply;
     reply->pgid = get_parent()->primary_spg_t();
     reply->map_epoch = get_osdmap_epoch();
@@ -811,7 +835,7 @@ bool ECBackend::_handle_message(
     handle_sub_read(op->op.from, op->op, &(reply->op), _op->pg_trace);
     reply->trace = _op->pg_trace;
     get_parent()->send_message_osd_cluster(
-      op->op.from.osd, reply, get_osdmap_epoch());
+      reply, _op->get_req()->get_connection());
     return true;
   }
   case MSG_OSD_EC_READ_REPLY: {
@@ -825,7 +849,7 @@ bool ECBackend::_handle_message(
     return true;
   }
   case MSG_OSD_PG_PUSH: {
-    const MOSDPGPush *op = static_cast<const MOSDPGPush *>(_op->get_req());
+    auto op = _op->get_req<MOSDPGPush>();
     RecoveryMessages rm;
     for (vector<PushOp>::const_iterator i = op->pushes.begin();
 	 i != op->pushes.end();
@@ -951,9 +975,10 @@ void ECBackend::handle_sub_write(
     }
   }
   get_parent()->log_operation(
-    op.log_entries,
+    std::move(op.log_entries),
     op.updated_hit_set_history,
     op.trim_to,
+    op.roll_forward_to,
     op.roll_forward_to,
     !op.backfill_or_async_recovery,
     localt,
@@ -1189,7 +1214,7 @@ void ECBackend::handle_sub_read_reply(
 	sinfo.aligned_offset_len_to_chunk(
 	  make_pair(req_iter->get<0>(), req_iter->get<1>()));
       ceph_assert(adjusted.first == j->first);
-      riter->get<2>()[from].claim(j->second);
+      riter->get<2>()[from] = std::move(j->second);
     }
   }
   for (auto i = op.attrs_read.begin();
@@ -1480,8 +1505,8 @@ void ECBackend::submit_transaction(
   const eversion_t &at_version,
   PGTransactionUPtr &&t,
   const eversion_t &trim_to,
-  const eversion_t &roll_forward_to,
-  const vector<pg_log_entry_t> &log_entries,
+  const eversion_t &min_last_complete_ondisk,
+  vector<pg_log_entry_t>&& log_entries,
   std::optional<pg_hit_set_history_t> &hset_history,
   Context *on_all_commit,
   ceph_tid_t tid,
@@ -1495,7 +1520,7 @@ void ECBackend::submit_transaction(
   op->delta_stats = delta_stats;
   op->version = at_version;
   op->trim_to = trim_to;
-  op->roll_forward_to = std::max(roll_forward_to, committed_to);
+  op->roll_forward_to = std::max(min_last_complete_ondisk, committed_to);
   op->log_entries = log_entries;
   std::swap(op->updated_hit_set_history, hset_history);
   op->on_all_commit = on_all_commit;
@@ -1741,6 +1766,8 @@ void ECBackend::do_read_op(ReadOp &op)
     }
   }
 
+  std::vector<std::pair<int, Message*>> m;
+  m.reserve(messages.size());
   for (map<pg_shard_t, ECSubRead>::iterator i = messages.begin();
        i != messages.end();
        ++i) {
@@ -1762,11 +1789,12 @@ void ECBackend::do_read_op(ReadOp &op)
       msg->trace.init("ec sub read", nullptr, &op.trace);
       msg->trace.keyval("shard", i->first.shard.id);
     }
-    get_parent()->send_message_osd_cluster(
-      i->first.osd,
-      msg,
-      get_osdmap_epoch());
+    m.push_back(std::make_pair(i->first.osd, msg));
   }
+  if (!m.empty()) {
+    get_parent()->send_message_osd_cluster(m, get_osdmap_epoch());
+  }
+
   dout(10) << __func__ << ": started " << op << dendl;
 }
 
@@ -2017,6 +2045,8 @@ bool ECBackend::try_reads_to_commit()
   ObjectStore::Transaction empty;
   bool should_write_local = false;
   ECSubWrite local_write_op;
+  std::vector<std::pair<int, Message*>> messages;
+  messages.reserve(get_parent()->get_acting_recovery_backfill_shards().size());
   set<pg_shard_t> backfill_shards = get_parent()->get_backfill_shards();
   for (set<pg_shard_t>::const_iterator i =
 	 get_parent()->get_acting_recovery_backfill_shards().begin();
@@ -2065,10 +2095,13 @@ bool ECBackend::try_reads_to_commit()
       r->map_epoch = get_osdmap_epoch();
       r->min_epoch = get_parent()->get_interval_start_epoch();
       r->trace = trace;
-      get_parent()->send_message_osd_cluster(
-	i->osd, r, get_osdmap_epoch());
+      messages.push_back(std::make_pair(i->osd, r));
     }
   }
+  if (!messages.empty()) {
+    get_parent()->send_message_osd_cluster(messages, get_osdmap_epoch());
+  }
+
   if (should_write_local) {
     handle_sub_write(
       get_parent()->whoami_shard(),
@@ -2301,7 +2334,7 @@ struct CallClientContexts :
 	     res.returned.front().get<2>().begin();
 	   j != res.returned.front().get<2>().end();
 	   ++j) {
-	to_decode[j->first.shard].claim(j->second);
+	to_decode[j->first.shard] = std::move(j->second);
       }
       int r = ECUtil::decode(
 	ec->sinfo,

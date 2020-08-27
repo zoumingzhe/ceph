@@ -19,6 +19,11 @@
 #include "include/ceph_assert.h"
 #include "mon/MonOpRequest.h"
 
+using std::ostream;
+using std::string;
+
+using ceph::bufferlist;
+
 #define dout_subsys ceph_subsys_paxos
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, mon, paxos, service_name, get_first_committed(), get_last_committed())
@@ -32,7 +37,7 @@ static ostream& _prefix(std::ostream *_dout, Monitor *mon, Paxos *paxos, string 
 bool PaxosService::dispatch(MonOpRequestRef op)
 {
   ceph_assert(op->is_type_service() || op->is_type_command());
-  PaxosServiceMessage *m = static_cast<PaxosServiceMessage*>(op->get_req());
+  auto m = op->get_req<PaxosServiceMessage>();
   op->mark_event("psvc:dispatch");
 
   dout(10) << __func__ << " " << m << " " << *m
@@ -117,7 +122,7 @@ bool PaxosService::dispatch(MonOpRequestRef op)
        * Callback class used to propose the pending value once the proposal_timer
        * fires up.
        */
-    auto do_propose = new C_MonContext(mon, [this](int r) {
+    auto do_propose = new C_MonContext{mon, [this](int r) {
         proposal_timer = 0;
         if (r >= 0) {
           propose_pending();
@@ -126,7 +131,7 @@ bool PaxosService::dispatch(MonOpRequestRef op)
         } else {
           ceph_abort_msg("bad return value for proposal_timer");
         }
-    });
+    }};
     dout(10) << " setting proposal_timer " << do_propose
              << " with delay of " << delay << dendl;
     proposal_timer = mon->timer.add_event_after(delay, do_propose);
@@ -436,6 +441,7 @@ void PaxosService::load_health()
   mon->store->get("health", service_name, bl);
   if (bl.length()) {
     auto p = bl.cbegin();
+    using ceph::decode;
     decode(health_checks, p);
   }
 }

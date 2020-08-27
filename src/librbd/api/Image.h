@@ -24,6 +24,8 @@ template <typename ImageCtxT = librbd::ImageCtx>
 struct Image {
   typedef std::map<std::string, std::string> ImageNameToIds;
 
+  static int64_t get_data_pool_id(ImageCtxT *ictx);
+
   static int get_op_features(ImageCtxT *ictx, uint64_t *op_features);
 
   static int list_images(librados::IoCtx& io_ctx,
@@ -65,6 +67,8 @@ struct Image {
 
   static int remove(librados::IoCtx& io_ctx, const std::string &image_name,
                     ProgressContext& prog_ctx);
+
+  static int flatten_children(ImageCtxT *ictx, const char* snap_name, ProgressContext& pctx);
 
 };
 

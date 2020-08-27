@@ -1,6 +1,4 @@
-<cd-view-cache *ngFor="let viewCacheStatus of viewCacheStatusList"
-               [status]="viewCacheStatus.status"
-               [statusFor]="viewCacheStatus.statusFor"></cd-view-cache>
+<cd-rbd-tabs></cd-rbd-tabs>
 
 <cd-table [data]="images"
           columnMode="flex"
@@ -8,6 +6,9 @@
           identifier="id"
           forceIdentifier="true"
           selectionType="single"
+          [status]="tableStatus"
+          [autoReload]="-1"
+          (fetchData)="taskListService.fetch()"
           (updateSelection)="updateSelection($event)">
   <div class="table-actions btn-toolbar">
     <cd-table-actions class="btn-group"
@@ -15,10 +16,10 @@
                       [selection]="selection"
                       [tableActions]="tableActions">
     </cd-table-actions>
-
     <button class="btn btn-light"
             type="button"
             (click)="purgeModal()"
+            [disabled]="disablePurgeBtn"
             *ngIf="permission.delete">
       <i [ngClass]="[icons.destroy]"
          aria-hidden="true"></i>

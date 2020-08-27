@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -18,22 +18,26 @@
 #define RGW_SYNC_LOG_TRIM_H
 
 #include <memory>
-#include <boost/utility/string_view.hpp>
+#include <string_view>
+
+#include "include/common_fwd.h"
 #include "include/encoding.h"
 #include "common/ceph_time.h"
 
-class CephContext;
 class RGWCoroutine;
 class RGWHTTPManager;
-class RGWRados;
 
 namespace rgw {
+
+namespace sal {
+  class RGWRadosStore;
+}
 
 /// Interface to inform the trim process about which buckets are most active
 struct BucketChangeObserver {
   virtual ~BucketChangeObserver() = default;
 
-  virtual void on_bucket_changed(const boost::string_view& bucket_instance) = 0;
+  virtual void on_bucket_changed(const std::string_view& bucket_instance) = 0;
 };
 
 /// Configuration for BucketTrimManager
@@ -69,13 +73,13 @@ class BucketTrimManager : public BucketChangeObserver {
   class Impl;
   std::unique_ptr<Impl> impl;
  public:
-  BucketTrimManager(RGWRados *store, const BucketTrimConfig& config);
+  BucketTrimManager(sal::RGWRadosStore *store, const BucketTrimConfig& config);
   ~BucketTrimManager();
 
   int init();
 
   /// increment a counter for the given bucket instance
-  void on_bucket_changed(const boost::string_view& bucket_instance) override;
+  void on_bucket_changed(const std::string_view& bucket_instance) override;
 
   /// create a coroutine to run the bucket trim process every trim interval
   RGWCoroutine* create_bucket_trim_cr(RGWHTTPManager *http);

@@ -17,12 +17,14 @@
 #include <seastar/core/sharded.hh>
 
 #include "msg/Policy.h"
-#include "Connection.h"
-#include "Socket.h"
-#include "crimson/thread/Throttle.h"
+#include "crimson/common/throttle.h"
+#include "crimson/net/chained_dispatchers.h"
+#include "crimson/net/Connection.h"
+#include "crimson/net/Socket.h"
 
-namespace ceph::net {
+namespace crimson::net {
 
+class Dispatcher;
 class Protocol;
 class SocketMessenger;
 class SocketConnection;
@@ -32,21 +34,7 @@ class SocketConnection : public Connection {
   SocketMessenger& messenger;
   std::unique_ptr<Protocol> protocol;
 
-  // if acceptor side, socket_port is different from peer_addr.get_port();
-  // if connector side, socket_port is different from my_addr.get_port().
-  enum class side_t {
-    none,
-    acceptor,
-    connector
-  };
-  side_t side = side_t::none;
-  uint16_t socket_port = 0;
-
-  ceph::net::Policy<ceph::thread::Throttle> policy;
-  uint64_t features;
-  void set_features(uint64_t new_features) {
-    features = new_features;
-  }
+  ceph::net::Policy<crimson::common::Throttle> policy;
 
   /// the seq num of the last transmitted message
   seq_num_t out_seq = 0;
@@ -59,50 +47,50 @@ class SocketConnection : public Connection {
 
   // messages to be resent after connection gets reset
   std::deque<MessageRef> out_q;
+  std::deque<MessageRef> pending_q;
   // messages sent, but not yet acked by peer
   std::deque<MessageRef> sent;
 
-  // which of the peer_addrs we're connecting to (as client)
-  // or should reconnect to (as peer)
-  entity_addr_t target_addr;
+  seastar::shard_id shard_id() const;
 
  public:
   SocketConnection(SocketMessenger& messenger,
-                   Dispatcher& dispatcher,
+                   ChainedDispatchersRef& dispatcher,
                    bool is_msgr2);
   ~SocketConnection() override;
 
   Messenger* get_messenger() const override;
 
-  int get_peer_type() const override {
-    return peer_type;
-  }
+  bool is_connected() const override;
 
-  seastar::future<bool> is_connected() override;
+#ifdef UNIT_TESTS_BUILT
+  bool is_closed_clean() const override;
+
+  bool is_closed() const override;
+
+  bool peer_wins() const override;
+#else
+  bool peer_wins() const;
+#endif
 
   seastar::future<> send(MessageRef msg) override;
 
   seastar::future<> keepalive() override;
 
-  seastar::future<> close() override;
-
-  seastar::shard_id shard_id() const override;
+  void mark_down() override;
 
   void print(ostream& out) const override;
 
- public:
   /// start a handshake from the client's perspective,
   /// only call when SocketConnection first construct
   void start_connect(const entity_addr_t& peer_addr,
-                     const entity_type_t& peer_type);
+                     const entity_name_t& peer_name);
   /// start a handshake from the server's perspective,
   /// only call when SocketConnection first construct
-  void start_accept(SocketFRef&& socket,
+  void start_accept(SocketRef&& socket,
                     const entity_addr_t& peer_addr);
 
-  seq_num_t rx_seq_num() const {
-    return in_seq;
-  }
+  seastar::future<> close_clean(bool dispatch_reset);
 
   bool is_server_side() const {
     return policy.server;
@@ -112,16 +100,9 @@ class SocketConnection : public Connection {
     return policy.lossy;
   }
 
-  /// move all messages in the sent list back into the queue
-  void requeue_sent();
-
-  std::tuple<seq_num_t, std::deque<MessageRef>> get_out_queue() {
-    return {out_seq, std::move(out_q)};
-  }
-
   friend class Protocol;
   friend class ProtocolV1;
   friend class ProtocolV2;
 };
 
-} // namespace ceph::net
+} // namespace crimson::net

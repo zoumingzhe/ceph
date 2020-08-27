@@ -5,8 +5,10 @@
 #include "cls/rbd/cls_rbd_client.h"
 #include "common/dout.h"
 #include "common/errno.h"
+#include "common/Cond.h"
 #include "librbd/Utils.h"
 #include "librbd/api/Config.h"
+#include "librbd/image/GetMetadataRequest.h"
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -34,6 +36,8 @@ int PoolMetadata<I>::set(librados::IoCtx& io_ctx, const std::string &key,
                          const std::string &value) {
   CephContext *cct = (CephContext *)io_ctx.cct();
 
+  bool update_pool_timestamp = false;
+
   std::string config_key;
   if (util::is_metadata_config_override(key, &config_key)) {
     if (!librbd::api::Config<I>::is_option_name(io_ctx, config_key)) {
@@ -47,6 +51,8 @@ int PoolMetadata<I>::set(librados::IoCtx& io_ctx, const std::string &key,
                  << dendl;
       return -EINVAL;
     }
+
+    update_pool_timestamp = true;
   }
 
   ceph::bufferlist bl;
@@ -57,6 +63,26 @@ int PoolMetadata<I>::set(librados::IoCtx& io_ctx, const std::string &key,
     lderr(cct) << "failed setting metadata " << key << ": " << cpp_strerror(r)
                << dendl;
     return r;
+  }
+
+  if (update_pool_timestamp) {
+    auto now = ceph_clock_now();
+    std::string cmd =
+      R"({)"
+        R"("prefix": "config set", )"
+        R"("who": "global", )"
+        R"("name": "rbd_config_pool_override_update_timestamp", )"
+        R"("value": ")" + stringify(now.sec()) + R"(")"
+      R"(})";
+
+    librados::Rados rados(io_ctx);
+    bufferlist in_bl;
+    std::string ss;
+    r = rados.mon_command(cmd, in_bl, nullptr, &ss);
+    if (r < 0) {
+      lderr(cct) << "failed to notify clients of pool config update: "
+                 << cpp_strerror(r) << dendl;
+    }
   }
 
   return 0;
@@ -94,15 +120,18 @@ int PoolMetadata<I>::list(librados::IoCtx& io_ctx, const std::string &start,
                           std::map<std::string, ceph::bufferlist> *pairs) {
   CephContext *cct = (CephContext *)io_ctx.cct();
 
-  int r = cls_client::metadata_list(&io_ctx, RBD_INFO, start, max, pairs);
-  if (r == -ENOENT) {
-    r = 0;
-  } else if (r < 0) {
+  pairs->clear();
+  C_SaferCond ctx;
+  auto req = image::GetMetadataRequest<I>::create(
+    io_ctx, RBD_INFO, false, "", start, max, pairs, &ctx);
+  req->send();
+
+  int r = ctx.wait();
+  if (r < 0) {
     lderr(cct) << "failed listing metadata: " << cpp_strerror(r)
                << dendl;
     return r;
   }
-
   return 0;
 }
 

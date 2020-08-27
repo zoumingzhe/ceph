@@ -20,7 +20,7 @@
 #include "auth/Crypto.h"
 #include "client/Client.h"
 #include "librados/RadosClient.h"
-#include "common/Mutex.h"
+#include "common/async/context_pool.h"
 #include "common/ceph_argparse.h"
 #include "common/common_init.h"
 #include "common/config.h"
@@ -37,6 +37,7 @@
 #define DEFAULT_UMASK 002
 
 static mode_t umask_cb(void *);
+ceph::async::io_context_pool icp;
 
 struct ceph_mount_info
 {
@@ -84,8 +85,9 @@ public:
       cct->_log->start();
     }
 
+    icp.start(cct->_conf.get_val<std::uint64_t>("client_asio_thread_count"));
     {
-      MonClient mc_bootstrap(cct);
+      MonClient mc_bootstrap(cct, icp);
       ret = mc_bootstrap.get_monmap_and_config();
       if (ret < 0)
 	return ret;
@@ -94,7 +96,7 @@ public:
     common_init_finish(cct);
 
     //monmap
-    monclient = new MonClient(cct);
+    monclient = new MonClient(cct, icp);
     ret = -CEPHFS_ERROR_MON_MAP_BUILD; //defined in libcephfs.h;
     if (monclient->build_initial_monmap() < 0)
       goto fail;
@@ -104,7 +106,7 @@ public:
 
     //at last the client
     ret = -CEPHFS_ERROR_NEW_CLIENT; //defined in libcephfs.h;
-    client = new StandaloneClient(messenger, monclient);
+    client = new StandaloneClient(messenger, monclient, icp);
     if (!client)
       goto fail;
 
@@ -117,7 +119,7 @@ public:
       goto fail;
 
     {
-      client_callback_args args = {};
+      ceph_client_callback_args args = {};
       args.handle = this;
       args.umask_cb = umask_cb;
       client->ll_register_callbacks(&args);
@@ -203,6 +205,7 @@ public:
       delete messenger;
       messenger = nullptr;
     }
+    icp.stop();
     if (monclient) {
       delete monclient;
       monclient = nullptr;
@@ -227,6 +230,13 @@ public:
   {
     this->umask = umask;
     return umask;
+  }
+
+  std::string getaddrs()
+  {
+    CachedStackStringStream cos;
+    *cos << messenger->get_myaddrs();
+    return std::string(cos->strv());
   }
 
   int conf_read_file(const char *path_list)
@@ -362,7 +372,7 @@ extern "C" const char *ceph_version(int *pmajor, int *pminor, int *ppatch)
     *pminor = (n >= 2) ? minor : 0;
   if (ppatch)
     *ppatch = (n >= 3) ? patch : 0;
-  return VERSION;
+  return PROJECT_VERSION;
 }
 
 extern "C" int ceph_create_with_context(struct ceph_mount_info **cmount, CephContext *cct)
@@ -425,6 +435,15 @@ extern "C" uint64_t ceph_get_instance_id(struct ceph_mount_info *cmount)
 {
   if (cmount->is_initialized())
     return cmount->get_client()->get_nodeid().v;
+  return 0;
+}
+
+extern "C" int ceph_getaddrs(struct ceph_mount_info *cmount, char** addrs)
+{
+  if (!cmount->is_initialized())
+    return -ENOTCONN;
+  auto s = cmount->getaddrs();
+  *addrs = strdup(s.c_str());
   return 0;
 }
 
@@ -1079,6 +1098,23 @@ extern "C" int ceph_lazyio(class ceph_mount_info *cmount,
   return (cmount->get_client()->lazyio(fd, enable));
 }
 
+extern "C" int ceph_lazyio_propagate(class ceph_mount_info *cmount,
+                           int fd, int64_t offset, size_t count)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return (cmount->get_client()->lazyio_propagate(fd, offset, count));
+}
+
+extern "C" int ceph_lazyio_synchronize(class ceph_mount_info *cmount,
+                           int fd, int64_t offset, size_t count)
+{
+  if (!cmount->is_mounted())
+    return -ENOTCONN;
+  return (cmount->get_client()->lazyio_synchronize(fd, offset, count));
+}
+
+
 extern "C" int ceph_sync_fs(struct ceph_mount_info *cmount)
 {
   if (!cmount->is_mounted())
@@ -1625,7 +1661,7 @@ extern "C" int ceph_ll_read(class ceph_mount_info *cmount, Fh* filehandle,
   r = cmount->get_client()->ll_read(filehandle, off, len, &bl);
   if (r >= 0)
     {
-      bl.copy(0, bl.length(), buf);
+      bl.begin().copy(bl.length(), buf);
       r = bl.length();
     }
   return r;
@@ -1769,8 +1805,7 @@ extern "C" int ceph_ll_opendir(class ceph_mount_info *cmount,
 extern "C" int ceph_ll_releasedir(class ceph_mount_info *cmount,
 				  ceph_dir_result *dir)
 {
-  (void) cmount->get_client()->ll_releasedir(reinterpret_cast<dir_result_t*>(dir));
-  return (0);
+  return cmount->get_client()->ll_releasedir(reinterpret_cast<dir_result_t*>(dir));
 }
 
 extern "C" int ceph_ll_rename(class ceph_mount_info *cmount,
@@ -1975,4 +2010,10 @@ extern "C" int ceph_start_reclaim(class ceph_mount_info *cmount,
 extern "C" void ceph_finish_reclaim(class ceph_mount_info *cmount)
 {
   cmount->get_client()->finish_reclaim();
+}
+
+extern "C" void ceph_ll_register_callbacks(class ceph_mount_info *cmount,
+					   struct ceph_client_callback_args *args)
+{
+  cmount->get_client()->ll_register_callbacks(args);
 }

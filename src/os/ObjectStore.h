@@ -14,10 +14,13 @@
 #ifndef CEPH_OBJECTSTORE_H
 #define CEPH_OBJECTSTORE_H
 
-#include "include/Context.h"
 #include "include/buffer.h"
-#include "include/types.h"
+#include "include/common_fwd.h"
+#include "include/Context.h"
+#include "include/interval_set.h"
 #include "include/stringify.h"
+#include "include/types.h"
+
 #include "osd/osd_types.h"
 #include "common/TrackedOp.h"
 #include "common/WorkQueue.h"
@@ -29,13 +32,11 @@
 #include <vector>
 #include <map>
 
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__sun)
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__sun) || defined(_WIN32)
 #include <sys/statvfs.h>
 #else
 #include <sys/vfs.h>    /* or <sys/statfs.h> */
 #endif
-
-class CephContext;
 
 namespace ceph {
   class Formatter;
@@ -118,15 +119,11 @@ public:
    * sequence.  Transactions queued under different collections may run
    * in parallel.
    *
-   * ObjectStore users my get collection handles with open_collection() (or,
+   * ObjectStore users may get collection handles with open_collection() (or,
    * for bootstrapping a new collection, create_new_collection()).
    */
   struct CollectionImpl : public RefCountedObject {
     const coll_t cid;
-
-    CollectionImpl(const coll_t& c)
-      : RefCountedObject(NULL, 0),
-	cid(c) {}
 
     /// wait for any queued transactions to apply
     // block until any previous transactions are visible.  specifically,
@@ -149,8 +146,12 @@ public:
     const coll_t &get_cid() {
       return cid;
     }
+  protected:
+    CollectionImpl() = delete;
+    CollectionImpl(CephContext* cct, const coll_t& c) : RefCountedObject(cct), cid(c) {}
+    ~CollectionImpl() = default;
   };
-  typedef boost::intrusive_ptr<CollectionImpl> CollectionHandle;
+  using CollectionHandle = ceph::ref_t<CollectionImpl>;
 
 
   /*********************************
@@ -259,6 +260,9 @@ public:
   virtual int repair(bool deep) {
     return -EOPNOTSUPP;
   }
+  virtual int quick_fix() {
+    return -EOPNOTSUPP;
+  }
 
   virtual void set_cache_shards(unsigned num) { }
 
@@ -337,9 +341,10 @@ public:
 
   virtual int statfs(struct store_statfs_t *buf,
 		     osd_alert_list_t* alerts = nullptr) = 0;
-  virtual int pool_statfs(uint64_t pool_id, struct store_statfs_t *buf) = 0;
+  virtual int pool_statfs(uint64_t pool_id, struct store_statfs_t *buf,
+			  bool *per_pool_omap) = 0;
 
-  virtual void collect_metadata(std::map<std::string,string> *pm) { }
+  virtual void collect_metadata(std::map<std::string,std::string> *pm) { }
 
   /**
    * write_meta - write a simple configuration key out-of-band
@@ -486,6 +491,58 @@ public:
 		      uint64_t offset, size_t len, std::map<uint64_t, uint64_t>& destmap) = 0;
 
   /**
+   * readv -- read specfic intervals from an object;
+   * caller must call fiemap to fill in the extent-map first.
+   *
+   * Note: if reading from an offset past the end of the object, we
+   * return 0 (not, say, -EINVAL). Also the default version of readv
+   * reads each extent separately synchronously, which can become horribly
+   * inefficient if the physical layout of the pushing object get massively
+   * fragmented and hence should be overridden by any real os that
+   * cares about the performance..
+   *
+   * @param cid collection for object
+   * @param oid oid of object
+   * @param m intervals to be read
+   * @param bl output ceph::buffer::list
+   * @param op_flags is CEPH_OSD_OP_FLAG_*
+   * @returns number of bytes read on success, or negative error code on failure.
+   */
+   virtual int readv(
+     CollectionHandle &c,
+     const ghobject_t& oid,
+     interval_set<uint64_t>& m,
+     ceph::buffer::list& bl,
+     uint32_t op_flags = 0) {
+     int total = 0;
+     for (auto p = m.begin(); p != m.end(); p++) {
+       ceph::buffer::list t;
+       int r = read(c, oid, p.get_start(), p.get_len(), t, op_flags);
+       if (r < 0)
+         return r;
+       total += r;
+       // prune fiemap, if necessary
+       if (p.get_len() != t.length()) {
+          auto save = p++;
+          if (t.length() == 0) {
+            m.erase(save); // Remove this empty interval
+          } else {
+            save.set_len(t.length()); // fix interval length
+            bl.claim_append(t);
+          }
+          // Remove any other follow-up intervals present too
+          while (p != m.end()) {
+            save = p++;
+            m.erase(save);
+          }
+          break;
+       }
+       bl.claim_append(t);
+     }
+     return total;
+   }
+
+  /**
    * dump_onode -- dumps onode metadata in human readable form,
      intended primiarily for debugging
    *
@@ -498,8 +555,8 @@ public:
   virtual int dump_onode(
     CollectionHandle &c,
     const ghobject_t& oid,
-    const string& section_name,
-    Formatter *f) {
+    const std::string& section_name,
+    ceph::Formatter *f) {
     return -ENOTSUP;
   }
 
@@ -649,6 +706,15 @@ public:
     const std::set<std::string> &keys,     ///< [in] Keys to get
     std::map<std::string, ceph::buffer::list> *out ///< [out] Returned keys and values
     ) = 0;
+
+#ifdef WITH_SEASTAR
+  virtual int omap_get_values(
+    CollectionHandle &c,         ///< [in] Collection containing oid
+    const ghobject_t &oid,       ///< [in] Object containing omap
+    const std::optional<std::string> &start_after,     ///< [in] Keys to get
+    std::map<std::string, ceph::buffer::list> *out ///< [out] Returned keys and values
+    ) = 0;
+#endif
 
   /// Filters keys into out which are defined on oid
   virtual int omap_check_keys(

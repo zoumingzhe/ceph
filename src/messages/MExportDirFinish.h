@@ -15,10 +15,13 @@
 #ifndef CEPH_MEXPORTDIRFINISH_H
 #define CEPH_MEXPORTDIRFINISH_H
 
-#include "msg/Message.h"
+#include "messages/MMDSOp.h"
 
-class MExportDirFinish : public Message {
+class MExportDirFinish : public MMDSOp {
 private:
+  static constexpr int HEAD_VERSION = 1;
+  static constexpr int COMPAT_VERSION = 1;
+
   dirfrag_t dirfrag;
   bool last;
 
@@ -27,16 +30,17 @@ private:
   bool is_last() const { return last; }
   
 protected:
-  MExportDirFinish() : last(false) {}
+  MExportDirFinish() :
+    MMDSOp{MSG_MDS_EXPORTDIRFINISH, HEAD_VERSION, COMPAT_VERSION}, last(false) {}
   MExportDirFinish(dirfrag_t df, bool l, uint64_t tid) :
-    Message{MSG_MDS_EXPORTDIRFINISH}, dirfrag(df), last(l) {
+    MMDSOp{MSG_MDS_EXPORTDIRFINISH, HEAD_VERSION, COMPAT_VERSION}, dirfrag(df), last(l) {
     set_tid(tid);
   }
   ~MExportDirFinish() override {}
 
 public:
   std::string_view get_type_name() const override { return "ExFin"; }
-  void print(ostream& o) const override {
+  void print(std::ostream& o) const override {
     o << "export_finish(" << dirfrag << (last ? " last" : "") << ")";
   }
   
@@ -46,6 +50,7 @@ public:
     encode(last, payload);
   }
   void decode_payload() override {
+    using ceph::decode;
     auto p = payload.cbegin();
     decode(dirfrag, p);
     decode(last, p);

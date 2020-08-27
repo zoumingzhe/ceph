@@ -1,6 +1,6 @@
 import { Component, OnInit } from '@angular/core';
 
-import { BsModalRef } from 'ngx-bootstrap/modal';
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 
 import { PoolService } from '../../../shared/api/pool.service';
 import { RbdService } from '../../../shared/api/rbd.service';
@@ -10,6 +10,7 @@ import { FinishedTask } from '../../../shared/models/finished-task';
 import { Permission } from '../../../shared/models/permissions';
 import { AuthStorageService } from '../../../shared/services/auth-storage.service';
 import { TaskWrapperService } from '../../../shared/services/task-wrapper.service';
+import { Pool } from '../../pool/pool';
 
 @Component({
   selector: 'cd-rbd-trash-purge-modal',
@@ -24,7 +25,7 @@ export class RbdTrashPurgeModalComponent implements OnInit {
   constructor(
     private authStorageService: AuthStorageService,
     private rbdService: RbdService,
-    public modalRef: BsModalRef,
+    public activeModal: NgbActiveModal,
     private fb: CdFormBuilder,
     private poolService: PoolService,
     private taskWrapper: TaskWrapperService
@@ -42,8 +43,8 @@ export class RbdTrashPurgeModalComponent implements OnInit {
     if (this.poolPermission.read) {
       this.poolService.list(['pool_name', 'application_metadata']).then((resp) => {
         this.pools = resp
-          .filter((pool) => pool.application_metadata.includes('rbd'))
-          .map((pool) => pool.pool_name);
+          .filter((pool: Pool) => pool.application_metadata.includes('rbd'))
+          .map((pool: Pool) => pool.pool_name);
       });
     }
 
@@ -59,14 +60,13 @@ export class RbdTrashPurgeModalComponent implements OnInit {
         }),
         call: this.rbdService.purgeTrash(poolName)
       })
-      .subscribe(
-        undefined,
-        () => {
+      .subscribe({
+        error: () => {
           this.purgeForm.setErrors({ cdSubmitButton: true });
         },
-        () => {
-          this.modalRef.hide();
+        complete: () => {
+          this.activeModal.close();
         }
-      );
+      });
   }
 }

@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #ifndef CEPH_RGW_STS_H
 #define CEPH_RGW_STS_H
@@ -22,6 +22,7 @@ protected:
   static constexpr uint64_t MAX_ROLE_SESSION_SIZE = 64;
   uint64_t MAX_DURATION_IN_SECS;
   uint64_t duration;
+  string err_msg;
   string iamPolicy;
   string roleArn;
   string roleSessionName;
@@ -107,7 +108,7 @@ class AssumedRoleUser {
   string assumeRoleId;
 public:
   int generateAssumedRoleUser( CephContext* cct,
-                                RGWRados *store,
+                                rgw::sal::RGWRadosStore *store,
                                 const string& roleId,
                                 const rgw::ARN& roleArn,
                                 const string& roleSessionName);
@@ -127,11 +128,13 @@ struct SessionToken {
   uint32_t perm_mask;
   bool is_admin;
   uint32_t acct_type;
+  string role_session;
+  std::vector<string> token_claims;
 
   SessionToken() {}
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(3, 1, bl);
     encode(access_key_id, bl);
     encode(secret_access_key, bl);
     encode(expiration, bl);
@@ -142,11 +145,13 @@ struct SessionToken {
     encode(perm_mask, bl);
     encode(is_admin, bl);
     encode(acct_type, bl);
+    encode(role_session, bl);
+    encode(token_claims, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(3, bl);
     decode(access_key_id, bl);
     decode(secret_access_key, bl);
     decode(expiration, bl);
@@ -157,6 +162,12 @@ struct SessionToken {
     decode(perm_mask, bl);
     decode(is_admin, bl);
     decode(acct_type, bl);
+    if (struct_v >= 2) {
+      decode(role_session, bl);
+    }
+    if (struct_v >= 3) {
+      decode(token_claims, bl);
+    }
     DECODE_FINISH(bl);
   }
 };
@@ -174,6 +185,8 @@ public:
                           const uint64_t& duration,
                           const boost::optional<string>& policy,
                           const boost::optional<string>& roleId,
+                          const boost::optional<string>& role_session,
+                          const boost::optional<std::vector<string> > token_claims,
                           boost::optional<rgw_user> user,
                           rgw::auth::Identity* identity);
   const string& getAccessKeyId() const { return accessKeyId; }
@@ -203,14 +216,14 @@ using AssumeRoleWithWebIdentityResponse = struct AssumeRoleWithWebIdentityRespon
 
 class STSService {
   CephContext* cct;
-  RGWRados *store;
+  rgw::sal::RGWRadosStore *store;
   rgw_user user_id;
   RGWRole role;
   rgw::auth::Identity* identity;
   int storeARN(string& arn);
 public:
   STSService() = default;
-  STSService(CephContext* cct, RGWRados *store, rgw_user user_id, rgw::auth::Identity* identity) : cct(cct), store(store), user_id(user_id), identity(identity) {}
+  STSService(CephContext* cct, rgw::sal::RGWRadosStore *store, rgw_user user_id, rgw::auth::Identity* identity) : cct(cct), store(store), user_id(user_id), identity(identity) {}
   std::tuple<int, RGWRole> getRoleInfo(const string& arn);
   AssumeRoleResponse assumeRole(AssumeRoleRequest& req);
   GetSessionTokenResponse getSessionToken(GetSessionTokenRequest& req);

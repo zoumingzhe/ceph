@@ -43,7 +43,10 @@ public:
 
   void set_halflife(double hl) {
     k = log(.5) / hl;
-  }    
+  }
+  double get_halflife() const {
+    return log(.5) / k;
+  }
 
 private:
   double k = 0;             // k = ln(.5)/half_life
@@ -57,9 +60,9 @@ public:
   DecayCounter() : DecayCounter(DecayRate()) {}
   explicit DecayCounter(const DecayRate &rate) : last_decay(clock::now()), rate(rate) {}
 
-  void encode(bufferlist& bl) const;
-  void decode(bufferlist::const_iterator& p);
-  void dump(Formatter *f) const;
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& p);
+  void dump(ceph::Formatter *f) const;
   static void generate_test_instances(std::list<DecayCounter*>& ls);
 
   /**
@@ -114,10 +117,10 @@ private:
   DecayRate rate;
 };
 
-inline void encode(const DecayCounter &c, bufferlist &bl) {
+inline void encode(const DecayCounter &c, ceph::buffer::list &bl) {
   c.encode(bl);
 }
-inline void decode(DecayCounter &c, bufferlist::const_iterator &p) {
+inline void decode(DecayCounter &c, ceph::buffer::list::const_iterator &p) {
   c.decode(p);
 }
 

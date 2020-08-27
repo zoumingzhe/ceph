@@ -7,17 +7,17 @@
 #include "librbd/Journal.h"
 #include "librbd/Types.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
 #include "librbd/cache/ImageCache.h"
 #include "librbd/io/AioCompletion.h"
 #include "librbd/io/AsyncOperation.h"
 #include "librbd/io/ObjectDispatchInterface.h"
 #include "librbd/io/ObjectDispatchSpec.h"
-#include "librbd/io/ObjectDispatcher.h"
+#include "librbd/io/ObjectDispatcherInterface.h"
 #include "librbd/io/Utils.h"
 #include "librbd/journal/Types.h"
 #include "include/rados/librados.hpp"
 #include "common/perf_counters.h"
-#include "common/WorkQueue.h"
 #include "osdc/Striper.h"
 #include <algorithm>
 #include <functional>
@@ -42,7 +42,7 @@ struct C_RBD_Readahead : public Context {
   uint64_t length;
 
   bufferlist read_data;
-  io::ExtentMap extent_map;
+  io::Extents extent_map;
 
   C_RBD_Readahead(I *ictx, uint64_t object_no, uint64_t offset, uint64_t length)
     : ictx(ictx), object_no(object_no), offset(offset), length(length) {
@@ -64,19 +64,19 @@ void readahead(I *ictx, const Extents& image_extents) {
     total_bytes += image_extent.second;
   }
 
-  ictx->image_lock.get_read();
+  ictx->image_lock.lock_shared();
   auto total_bytes_read = ictx->total_bytes_read.fetch_add(total_bytes);
   bool abort = (
     ictx->readahead_disable_after_bytes != 0 &&
     total_bytes_read > ictx->readahead_disable_after_bytes);
   if (abort) {
-    ictx->image_lock.put_read();
+    ictx->image_lock.unlock_shared();
     return;
   }
 
   uint64_t image_size = ictx->get_image_size(ictx->snap_id);
   auto snap_id = ictx->snap_id;
-  ictx->image_lock.put_read();
+  ictx->image_lock.unlock_shared();
 
   auto readahead_extent = ictx->readahead.update(image_extents, image_size);
   uint64_t readahead_offset = readahead_extent.first;
@@ -101,8 +101,8 @@ void readahead(I *ictx, const Extents& image_extents) {
                                              object_extent.length);
       auto req = io::ObjectDispatchSpec::create_read(
         ictx, io::OBJECT_DISPATCH_LAYER_NONE, object_extent.object_no,
-        object_extent.offset, object_extent.length, snap_id, 0, {},
-        &req_comp->read_data, &req_comp->extent_map, req_comp);
+        {{object_extent.offset, object_extent.length}}, snap_id, 0, {},
+        &req_comp->read_data, &req_comp->extent_map, nullptr, req_comp);
       req->send();
     }
 
@@ -219,7 +219,6 @@ void ImageRequest<I>::aio_compare_and_write(I *ictx, AioCompletion *c,
   req.send();
 }
 
-
 template <typename I>
 void ImageRequest<I>::send() {
   I &image_ctx = this->m_image_ctx;
@@ -237,6 +236,10 @@ void ImageRequest<I>::send() {
     return;
   }
 
+  if (finish_request_early()) {
+    return;
+  }
+
   if (m_bypass_image_cache || m_image_ctx.image_cache == nullptr) {
     update_timestamp();
     send_request();
@@ -247,7 +250,7 @@ void ImageRequest<I>::send() {
 
 template <typename I>
 int ImageRequest<I>::clip_request() {
-  RWLock::RLocker image_locker(m_image_ctx.image_lock);
+  std::shared_lock image_locker{m_image_ctx.image_lock};
   for (auto &image_extent : m_image_extents) {
     auto clip_len = image_extent.second;
     int r = clip_io(get_image_ctx(&m_image_ctx), image_extent.first, &clip_len);
@@ -258,6 +261,15 @@ int ImageRequest<I>::clip_request() {
     image_extent.second = clip_len;
   }
   return 0;
+}
+
+template <typename I>
+uint64_t ImageRequest<I>::get_total_length() const {
+  uint64_t total_bytes = 0;
+  for (auto& image_extent : this->m_image_extents) {
+    total_bytes += image_extent.second;
+  }
+  return total_bytes;
 }
 
 template <typename I>
@@ -286,7 +298,7 @@ void ImageRequest<I>::update_timestamp() {
 
   utime_t ts = ceph_clock_now();
   {
-    RWLock::RLocker timestamp_locker(m_image_ctx.timestamp_lock);
+    std::shared_lock timestamp_locker{m_image_ctx.timestamp_lock};
     if(!should_update_timestamp(ts, std::invoke(get_timestamp_fn, m_image_ctx),
                                 update_interval)) {
       return;
@@ -294,7 +306,7 @@ void ImageRequest<I>::update_timestamp() {
   }
 
   {
-    RWLock::WLocker timestamp_locker(m_image_ctx.timestamp_lock);
+    std::unique_lock timestamp_locker{m_image_ctx.timestamp_lock};
     bool update = should_update_timestamp(
       ts, std::invoke(get_timestamp_fn, m_image_ctx), update_interval);
     if (!update) {
@@ -340,6 +352,17 @@ int ImageReadRequest<I>::clip_request() {
 }
 
 template <typename I>
+bool ImageReadRequest<I>::finish_request_early() {
+  auto total_bytes = this->get_total_length();
+  if (total_bytes == 0) {
+    auto *aio_comp = this->m_aio_comp;
+    aio_comp->set_request_count(0);
+    return true;
+  }
+  return false;
+}
+
+template <typename I>
 void ImageReadRequest<I>::send_request() {
   I &image_ctx = this->m_image_ctx;
   CephContext *cct = image_ctx.cct;
@@ -355,7 +378,7 @@ void ImageReadRequest<I>::send_request() {
   {
     // prevent image size from changing between computing clip and recording
     // pending async operation
-    RWLock::RLocker image_locker(image_ctx.image_lock);
+    std::shared_lock image_locker{image_ctx.image_lock};
     snap_id = image_ctx.snap_id;
   }
 
@@ -382,9 +405,9 @@ void ImageReadRequest<I>::send_request() {
     auto req_comp = new io::ReadResult::C_ObjectReadRequest(
       aio_comp, oe.offset, oe.length, std::move(oe.buffer_extents));
     auto req = ObjectDispatchSpec::create_read(
-      &image_ctx, OBJECT_DISPATCH_LAYER_NONE, oe.object_no, oe.offset,
-      oe.length, snap_id, m_op_flags, this->m_trace, &req_comp->bl,
-      &req_comp->extent_map, req_comp);
+      &image_ctx, OBJECT_DISPATCH_LAYER_NONE, oe.object_no,
+      {{oe.offset, oe.length}}, snap_id, m_op_flags, this->m_trace,
+      &req_comp->bl, &req_comp->extent_map, nullptr, req_comp);
     req->send();
   }
 
@@ -408,6 +431,24 @@ void ImageReadRequest<I>::send_image_cache_request() {
 }
 
 template <typename I>
+bool AbstractImageWriteRequest<I>::finish_request_early() {
+  AioCompletion *aio_comp = this->m_aio_comp;
+  {
+    std::shared_lock image_locker{this->m_image_ctx.image_lock};
+    if (this->m_image_ctx.snap_id != CEPH_NOSNAP || this->m_image_ctx.read_only) {
+      aio_comp->fail(-EROFS);
+      return true;
+    }
+  }
+  auto total_bytes = this->get_total_length();
+  if (total_bytes == 0) {
+    aio_comp->set_request_count(0);
+    return true;
+  }
+  return false;
+}
+
+template <typename I>
 void AbstractImageWriteRequest<I>::send_request() {
   I &image_ctx = this->m_image_ctx;
   CephContext *cct = image_ctx.cct;
@@ -419,11 +460,7 @@ void AbstractImageWriteRequest<I>::send_request() {
   {
     // prevent image size from changing between computing clip and recording
     // pending async operation
-    RWLock::RLocker image_locker(image_ctx.image_lock);
-    if (image_ctx.snap_id != CEPH_NOSNAP || image_ctx.read_only) {
-      aio_comp->fail(-EROFS);
-      return;
-    }
+    std::shared_lock image_locker{image_ctx.image_lock};
 
     snapc = image_ctx.snapc;
     journaling = (image_ctx.journal != nullptr &&
@@ -542,8 +579,8 @@ ObjectDispatchSpec *ImageWriteRequest<I>::create_object_request(
 
   auto req = ObjectDispatchSpec::create_write(
     &image_ctx, OBJECT_DISPATCH_LAYER_NONE, object_extent.object_no,
-    object_extent.offset, std::move(bl), snapc, m_op_flags, journal_tid,
-    this->m_trace, on_finish);
+    object_extent.offset, std::move(bl), snapc, m_op_flags, 0, std::nullopt,
+    journal_tid, this->m_trace, on_finish);
   return req;
 }
 
@@ -666,7 +703,7 @@ void ImageFlushRequest<I>::send_request() {
 
   bool journaling = false;
   {
-    RWLock::RLocker image_locker(image_ctx.image_lock);
+    std::shared_lock image_locker{image_ctx.image_lock};
     journaling = (m_flush_source == FLUSH_SOURCE_USER &&
                   image_ctx.journal != nullptr &&
                   image_ctx.journal->is_journal_appending());
@@ -692,12 +729,16 @@ void ImageFlushRequest<I>::send_request() {
   auto object_dispatch_spec = ObjectDispatchSpec::create_flush(
     &image_ctx, OBJECT_DISPATCH_LAYER_NONE, m_flush_source, journal_tid,
     this->m_trace, ctx);
-  ctx = new FunctionContext([object_dispatch_spec](int r) {
+  ctx = new LambdaContext([object_dispatch_spec](int r) {
       object_dispatch_spec->send();
     });
 
   // ensure all in-flight IOs are settled if non-user flush request
-  aio_comp->async_op.flush(ctx);
+  if (m_flush_source == FLUSH_SOURCE_WRITEBACK) {
+    ctx->complete(0);
+  } else {
+    aio_comp->async_op.flush(ctx);
+  }
 
   // might be flushing during image shutdown
   if (image_ctx.perfcounter != nullptr) {
@@ -713,7 +754,7 @@ void ImageFlushRequest<I>::send_image_cache_request() {
   AioCompletion *aio_comp = this->m_aio_comp;
   aio_comp->set_request_count(1);
   C_AioRequest *req_comp = new C_AioRequest(aio_comp);
-  image_ctx.image_cache->aio_flush(req_comp);
+  image_ctx.image_cache->aio_flush(m_flush_source, req_comp);
 }
 
 template <typename I>
@@ -770,8 +811,8 @@ ObjectDispatchSpec *ImageWriteSameRequest<I>::create_object_request(
   }
   req = ObjectDispatchSpec::create_write(
     &image_ctx, OBJECT_DISPATCH_LAYER_NONE, object_extent.object_no,
-    object_extent.offset, std::move(bl), snapc, m_op_flags, journal_tid,
-    this->m_trace, on_finish);
+    object_extent.offset, std::move(bl), snapc, m_op_flags, 0, std::nullopt,
+    journal_tid, this->m_trace, on_finish);
   return req;
 }
 

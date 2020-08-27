@@ -1,9 +1,8 @@
 import { Component, Input, OnChanges } from '@angular/core';
 
-import * as _ from 'lodash';
+import _ from 'lodash';
 
 import { OsdService } from '../../../../shared/api/osd.service';
-import { CdTableSelection } from '../../../../shared/models/cd-table-selection';
 import { Permission } from '../../../../shared/models/permissions';
 import { AuthStorageService } from '../../../../shared/services/auth-storage.service';
 
@@ -14,9 +13,14 @@ import { AuthStorageService } from '../../../../shared/services/auth-storage.ser
 })
 export class OsdDetailsComponent implements OnChanges {
   @Input()
-  selection: CdTableSelection;
+  selection: any;
 
-  osd: any;
+  osd: {
+    id?: number;
+    details?: any;
+    histogram_failed?: string;
+    tree?: any;
+  };
   grafanaPermission: Permission;
 
   constructor(private osdService: OsdService, private authStorageService: AuthStorageService) {
@@ -24,24 +28,23 @@ export class OsdDetailsComponent implements OnChanges {
   }
 
   ngOnChanges() {
-    this.osd = {
-      loaded: false
-    };
-    if (this.selection.hasSelection) {
-      this.osd = this.selection.first();
+    if (this.osd?.id !== this.selection?.id) {
+      this.osd = this.selection;
+    }
+
+    if (_.isNumber(this.osd?.id)) {
       this.refresh();
     }
   }
 
   refresh() {
-    this.osdService.getDetails(this.osd.id).subscribe((data: any) => {
+    this.osdService.getDetails(this.osd.id).subscribe((data) => {
       this.osd.details = data;
       this.osd.histogram_failed = '';
       if (!_.isObject(data.histogram)) {
         this.osd.histogram_failed = data.histogram;
         this.osd.details.histogram = undefined;
       }
-      this.osd.loaded = true;
     });
   }
 }

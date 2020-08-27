@@ -2,10 +2,10 @@
 // vim: ts=8 sw=2 smarttab
 
 #include "librbd/io/AsyncOperation.h"
-#include "librbd/ImageCtx.h"
-#include "common/dout.h"
-#include "common/WorkQueue.h"
 #include "include/ceph_assert.h"
+#include "common/dout.h"
+#include "librbd/AsioEngine.h"
+#include "librbd/ImageCtx.h"
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -25,7 +25,7 @@ struct C_CompleteFlushes : public Context {
     : image_ctx(image_ctx), flush_contexts(std::move(flush_contexts)) {
   }
   void finish(int r) override {
-    RWLock::RLocker owner_locker(image_ctx->owner_lock);
+    std::shared_lock owner_locker{image_ctx->owner_lock};
     while (!flush_contexts.empty()) {
       Context *flush_ctx = flush_contexts.front();
       flush_contexts.pop_front();
@@ -43,7 +43,7 @@ void AsyncOperation::start_op(ImageCtx &image_ctx) {
   m_image_ctx = &image_ctx;
 
   ldout(m_image_ctx->cct, 20) << this << " " << __func__ << dendl;
-  Mutex::Locker l(m_image_ctx->async_ops_lock);
+  std::lock_guard l{m_image_ctx->async_ops_lock};
   m_image_ctx->async_ops.push_front(&m_xlist_item);
 }
 
@@ -51,7 +51,7 @@ void AsyncOperation::finish_op() {
   ldout(m_image_ctx->cct, 20) << this << " " << __func__ << dendl;
 
   {
-    Mutex::Locker l(m_image_ctx->async_ops_lock);
+    std::lock_guard l{m_image_ctx->async_ops_lock};
     xlist<AsyncOperation *>::iterator iter(&m_xlist_item);
     ++iter;
     ceph_assert(m_xlist_item.remove_myself());
@@ -70,13 +70,13 @@ void AsyncOperation::finish_op() {
   if (!m_flush_contexts.empty()) {
     C_CompleteFlushes *ctx = new C_CompleteFlushes(m_image_ctx,
                                                    std::move(m_flush_contexts));
-    m_image_ctx->op_work_queue->queue(ctx);
+    m_image_ctx->asio_engine->post(ctx, 0);
   }
 }
 
 void AsyncOperation::flush(Context* on_finish) {
   {
-    Mutex::Locker locker(m_image_ctx->async_ops_lock);
+    std::lock_guard locker{m_image_ctx->async_ops_lock};
     xlist<AsyncOperation *>::iterator iter(&m_xlist_item);
     ++iter;
 
@@ -87,7 +87,7 @@ void AsyncOperation::flush(Context* on_finish) {
     }
   }
 
-  m_image_ctx->op_work_queue->queue(on_finish);
+  m_image_ctx->asio_engine->post(on_finish, 0);
 }
 
 } // namespace io

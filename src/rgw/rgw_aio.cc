@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -31,7 +31,7 @@ struct state {
 
   state(Aio* aio, AioResult& r)
     : aio(aio),
-      c(librados::Rados::aio_create_completion(&r, nullptr, &cb)) {}
+      c(librados::Rados::aio_create_completion(&r, &cb)) {}
 };
 
 void cb(librados::completion_t, void* arg) {
@@ -80,16 +80,16 @@ struct Handler {
 
 template <typename Op>
 Aio::OpFunc aio_abstract(Op&& op, boost::asio::io_context& context,
-                         boost::asio::yield_context yield) {
+                         spawn::yield_context yield) {
   return [op = std::move(op), &context, yield] (Aio* aio, AioResult& r) mutable {
       // arrange for the completion Handler to run on the yield_context's strand
       // executor so it can safely call back into Aio without locking
       using namespace boost::asio;
-      async_completion<yield_context, void()> init(yield);
+      async_completion<spawn::yield_context, void()> init(yield);
       auto ex = get_associated_executor(init.completion_handler);
 
       auto& ref = r.obj.get_ref();
-      librados::async_operate(context, ref.ioctx, ref.obj.oid, &op, 0,
+      librados::async_operate(context, ref.pool.ioctx(), ref.obj.oid, &op, 0,
                               bind_executor(ex, Handler{aio, r}));
     };
 }

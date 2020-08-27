@@ -18,6 +18,7 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <optional>
 #include <sys/time.h>
 
 #include "include/ceph_assert.h"
@@ -434,6 +435,9 @@ namespace ceph {
       return std::chrono::duration_cast<timespan>(
 	std::chrono::duration<double>(d));
     }
+    inline std::optional<timespan> maybe_timespan(const double d) {
+      return d ? std::make_optional(make_timespan(d)) : std::nullopt;
+    }
   }
 
   std::ostream& operator<<(std::ostream& m, const timespan& t);
@@ -482,7 +486,19 @@ inline timespan abs(signedspan z) {
     timespan(-z.count());
 }
 inline timespan to_timespan(signedspan z) {
-  ceph_assert(z >= signedspan::zero());
+  if (z < signedspan::zero()) {
+    //ceph_assert(z >= signedspan::zero());
+    // There is a kernel bug that seems to be triggering this assert.  We've
+    // seen it in:
+    //   centos 8.1: 4.18.0-147.el8.x86_64
+    //   debian 10.3: 4.19.0-8-amd64
+    //   debian 10.1: 4.19.67-2+deb10u1
+    //   ubuntu 18.04
+    // see bugs:
+    //   https://tracker.ceph.com/issues/43365
+    //   https://tracker.ceph.com/issues/44078
+    z = signedspan::zero();
+  }
   return std::chrono::duration_cast<timespan>(z);
 }
 
@@ -502,6 +518,20 @@ struct converts_to_timespec<Clock, std::void_t<decltype(
 
 template <typename Clock>
 constexpr bool converts_to_timespec_v = converts_to_timespec<Clock>::value;
+
+template<typename Rep, typename T>
+static Rep to_seconds(T t) {
+  return std::chrono::duration_cast<
+    std::chrono::duration<Rep>>(t).count();
+}
+
+template<typename Rep, typename T>
+static Rep to_microseconds(T t) {
+  return std::chrono::duration_cast<
+    std::chrono::duration<
+      Rep,
+      std::micro>>(t).count();
+}
 
 } // namespace ceph
 

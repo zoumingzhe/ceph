@@ -14,7 +14,7 @@
 // and make_recursive_mutex() factory methods, which take a string
 // naming the mutex for the purposes of the lockdep debug variant.
 
-#ifdef WITH_SEASTAR
+#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
 
 namespace ceph {
   // an empty class satisfying the mutex concept
@@ -24,6 +24,8 @@ namespace ceph {
       return true;
     }
     void unlock() {}
+    void lock_shared() {}
+    void unlock_shared() {}
   };
 
   struct dummy_shared_mutex : dummy_mutex {
@@ -56,7 +58,7 @@ namespace ceph {
   #define ceph_mutex_is_locked_by_me(m) true
 }
 
-#else  // WITH_SEASTAR
+#else  // defined (WITH_SEASTAR) && !defined(WITH_ALIEN)
 //
 // For legacy Mutex users that passed recursive=true, use
 // ceph::make_recursive_mutex.  For legacy Mutex users that passed
@@ -98,7 +100,11 @@ namespace ceph {
 
   // debug methods
   #define ceph_mutex_is_locked(m) ((m).is_locked())
+  #define ceph_mutex_is_not_locked(m) (!(m).is_locked())
+  #define ceph_mutex_is_rlocked(m) ((m).is_rlocked())
+  #define ceph_mutex_is_wlocked(m) ((m).is_wlocked())
   #define ceph_mutex_is_locked_by_me(m) ((m).is_locked_by_me())
+  #define ceph_mutex_is_not_locked_by_me(m) (!(m).is_locked_by_me())
 }
 
 #else
@@ -137,7 +143,12 @@ namespace ceph {
   // because any code that does anything other than assert these
   // are true is broken.
   #define ceph_mutex_is_locked(m) true
+  #define ceph_mutex_is_not_locked(m) true
+  #define ceph_mutex_is_rlocked(m) true
+  #define ceph_mutex_is_wlocked(m) true
   #define ceph_mutex_is_locked_by_me(m) true
+  #define ceph_mutex_is_not_locked_by_me(m) true
+
 }
 
 #endif	// CEPH_DEBUG_MUTEX

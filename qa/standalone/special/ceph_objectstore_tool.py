@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python3
 
 from __future__ import print_function
 from subprocess import call
@@ -38,14 +38,15 @@ try:
 except ImportError:
     DEVNULL = open(os.devnull, "wb")
 
-logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.WARNING)
+logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.WARNING,
+                    datefmt="%FT%T")
 
 
 if sys.version_info[0] >= 3:
     def decode(s):
         return s.decode('utf-8')
 
-    def check_output(*args, **kwargs):
+    def check_output(*args, **kwargs): # noqa
         return decode(subprocess.check_output(*args, **kwargs))
 else:
     def decode(s):
@@ -149,9 +150,9 @@ def cat_file(level, filename):
     print("<EOF>")
 
 
-def vstart(new, opt=""):
+def vstart(new, opt="-o osd_pool_default_pg_autoscale_mode=off"):
     print("vstarting....", end="")
-    NEW = new and "-n" or "-N"
+    NEW = new and "-n" or "-k"
     call("MON=1 OSD=4 MDS=0 MGR=1 CEPH_PORT=7400 MGR_PYTHON_PATH={path}/src/pybind/mgr {path}/src/vstart.sh --filestore --short -l {new} -d {opt} > /dev/null 2>&1".format(new=NEW, opt=opt, path=CEPH_ROOT), shell=True)
     print("DONE")
 
@@ -336,7 +337,7 @@ def check_entry_transactions(entry, enum):
 
 
 def check_transaction_ops(ops, enum, tnum):
-    if len(ops) is 0:
+    if len(ops) == 0:
         logging.warning("No ops found in entry {e} trans {t}".format(e=enum, t=tnum))
     errors = 0
     for onum in range(len(ops)):
@@ -375,7 +376,7 @@ def test_dump_journal(CFSD_PREFIX, osds):
         os.unlink(TMPFILE)
 
         journal_errors = check_journal(jsondict)
-        if journal_errors is not 0:
+        if journal_errors != 0:
             logging.error(jsondict)
         ERRORS += journal_errors
 
@@ -519,7 +520,7 @@ def get_osd_weights(CFSD_PREFIX, osd_ids, osd_path):
     for line in output.strip().split('\n'):
         print(line)
         linev = re.split('\s+', line)
-        if linev[0] is '':
+        if linev[0] == '':
             linev.pop(0)
         print('linev %s' % linev)
         weights.append(float(linev[2]))
@@ -604,6 +605,7 @@ def test_removeall(CFSD_PREFIX, db, OBJREPPGS, REP_POOL, CEPH_BIN, OSDDIR, REP_N
     errors=0
     print("Test removeall")
     kill_daemons()
+    test_force_remove = 0
     for nspace in db.keys():
         for basename in db[nspace].keys():
             JSON = db[nspace][basename]['json']
@@ -619,6 +621,25 @@ def test_removeall(CFSD_PREFIX, db, OBJREPPGS, REP_POOL, CEPH_BIN, OSDDIR, REP_N
                     if int(basename.split(REP_NAME)[1]) <= int(NUM_CLONED_REP_OBJECTS):
                         cmd = (CFSD_PREFIX + "'{json}' remove").format(osd=osd, json=JSON)
                         errors += test_failure(cmd, "Clones are present, use removeall to delete everything")
+                        if not test_force_remove:
+
+                            cmd = (CFSD_PREFIX + " '{json}' set-attr snapset /dev/null").format(osd=osd, json=JSON)
+                            logging.debug(cmd)
+                            ret = call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
+                            if ret != 0:
+                                logging.error("Test set-up to corrupt snapset failed for {json}".format(json=JSON))
+                                errors += 1
+                                # Do the removeall since this test failed to set-up
+                            else:
+                                test_force_remove = 1
+
+                                cmd = (CFSD_PREFIX + " '{json}' --force remove").format(osd=osd, json=JSON)
+                                logging.debug(cmd)
+                                ret = call(cmd, shell=True, stdout=nullfd, stderr=nullfd)
+                                if ret != 0:
+                                    logging.error("forced remove with corrupt snapset failed for {json}".format(json=JSON))
+                                    errors += 1
+                                continue
 
                     cmd = (CFSD_PREFIX + " --force --dry-run '{json}' remove").format(osd=osd, json=JSON)
                     logging.debug(cmd)
@@ -667,10 +688,7 @@ def test_removeall(CFSD_PREFIX, db, OBJREPPGS, REP_POOL, CEPH_BIN, OSDDIR, REP_N
 
 
 def main(argv):
-    if sys.version_info[0] < 3:
-        sys.stdout = stdout = os.fdopen(sys.stdout.fileno(), 'wb', 0)
-    else:
-        stdout = sys.stdout.buffer
+    stdout = sys.stdout.buffer
     if len(argv) > 1 and argv[1] == "debug":
         nullfd = stdout
     else:
@@ -976,7 +994,7 @@ def main(argv):
     cmd = (CFSD_PREFIX + "--op import --file {FOO}").format(osd=ONEOSD, FOO=OTHERFILE)
     ERRORS += test_failure(cmd, "file: {FOO}: No such file or directory".format(FOO=OTHERFILE))
 
-    cmd = "{path}/ceph-objectstore-tool --no-mon-config --data-path BAD_DATA_PATH --op list".format(osd=ONEOSD, path=CEPH_BIN)
+    cmd = "{path}/ceph-objectstore-tool --no-mon-config --data-path BAD_DATA_PATH --op list".format(path=CEPH_BIN)
     ERRORS += test_failure(cmd, "data-path: BAD_DATA_PATH: No such file or directory")
 
     cmd = (CFSD_PREFIX + "--journal-path BAD_JOURNAL_PATH --op list").format(osd=ONEOSD)
@@ -999,7 +1017,7 @@ def main(argv):
     ERRORS += test_failure(cmd, "Unable to create store of type foobar")
 
     # Don't specify a data-path
-    cmd = "{path}/ceph-objectstore-tool --no-mon-config --type memstore --op list --pgid {pg}".format(dir=OSDDIR, osd=ONEOSD, pg=ONEPG, path=CEPH_BIN)
+    cmd = "{path}/ceph-objectstore-tool --no-mon-config --type memstore --op list --pgid {pg}".format(pg=ONEPG, path=CEPH_BIN)
     ERRORS += test_failure(cmd, "Must provide --data-path")
 
     cmd = (CFSD_PREFIX + "--op remove --pgid 2.0").format(osd=ONEOSD)
@@ -1014,7 +1032,7 @@ def main(argv):
 
     # Specify a bad --op command
     cmd = (CFSD_PREFIX + "--op oops").format(osd=ONEOSD)
-    ERRORS += test_failure(cmd, "Must provide --op (info, log, remove, mkfs, fsck, repair, export, export-remove, import, list, fix-lost, list-pgs, dump-journal, dump-super, meta-list, get-osdmap, set-osdmap, get-inc-osdmap, set-inc-osdmap, mark-complete, reset-last-complete, dump-export, trim-pg-log)")
+    ERRORS += test_failure(cmd, "Must provide --op (info, log, remove, mkfs, fsck, repair, export, export-remove, import, list, fix-lost, list-pgs, dump-journal, dump-super, meta-list, get-osdmap, set-osdmap, get-inc-osdmap, set-inc-osdmap, mark-complete, reset-last-complete, dump-export, trim-pg-log, statfs)")
 
     # Provide just the object param not a command
     cmd = (CFSD_PREFIX + "object").format(osd=ONEOSD)
@@ -1514,14 +1532,17 @@ def main(argv):
                     jsondict[1]['shard_id'] = int(pg.split('s')[1])
                     JSON = json.dumps((pg, jsondict[1]))
                     for osd in OSDS:
-                        cmd = (CFSD_PREFIX + " '{json}' get-attr hinfo_key").format(osd=osd, json=JSON)
+                        cmd = (CFSD_PREFIX + " --tty '{json}' get-attr hinfo_key").format(osd=osd, json=JSON)
                         logging.debug("TRY: " + cmd)
                         try:
                             out = check_output(cmd, shell=True, stderr=subprocess.STDOUT)
                             logging.debug("FOUND: {json} in {osd} has value '{val}'".format(osd=osd, json=JSON, val=out))
                             found += 1
                         except subprocess.CalledProcessError as e:
-                            if "No such file or directory" not in e.output and "No data available" not in e.output:
+                            logging.debug("Error message: {output}".format(output=e.output))
+                            if "No such file or directory" not in str(e.output) and \
+                               "No data available" not in str(e.output) and \
+                               "not contained by pg" not in str(e.output):
                                 raise
                 # Assuming k=2 m=1 for the default ec pool
                 if found != 3:

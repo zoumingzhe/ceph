@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #include "common/errno.h"
 
@@ -179,7 +179,8 @@ int RGWZoneGroup::equals(const string& other_zonegroup) const
 int RGWZoneGroup::add_zone(const RGWZoneParams& zone_params, bool *is_master, bool *read_only,
                            const list<string>& endpoints, const string *ptier_type,
                            bool *psync_from_all, list<string>& sync_from, list<string>& sync_from_rm,
-                           string *predirect_zone, RGWSyncModulesManager *sync_mgr)
+                           string *predirect_zone, std::optional<int> bucket_index_max_shards,
+                           RGWSyncModulesManager *sync_mgr)
 {
   auto& zone_id = zone_params.get_id();
   auto& zone_name = zone_params.get_name();
@@ -234,6 +235,10 @@ int RGWZoneGroup::add_zone(const RGWZoneParams& zone_params, bool *is_master, bo
     zone.redirect_zone = *predirect_zone;
   }
 
+  if (bucket_index_max_shards) {
+    zone.bucket_index_max_shards = *bucket_index_max_shards;
+  }
+
   for (auto add : sync_from) {
     zone.sync_from.insert(add);
   }
@@ -261,14 +266,14 @@ void RGWZoneGroup::post_process_params()
   bool log_data = zones.size() > 1;
 
   if (master_zone.empty()) {
-    map<string, RGWZone>::iterator iter = zones.begin();
+    auto iter = zones.begin();
     if (iter != zones.end()) {
       master_zone = iter->first;
     }
   }
   
-  for (map<string, RGWZone>::iterator iter = zones.begin(); iter != zones.end(); ++iter) {
-    RGWZone& zone = iter->second;
+  for (auto& item : zones) {
+    RGWZone& zone = item.second;
     zone.log_data = log_data;
 
     RGWZoneParams zone_params(zone.id, zone.name);
@@ -278,9 +283,8 @@ void RGWZoneGroup::post_process_params()
       continue;
     }
 
-    for (map<string, RGWZonePlacementInfo>::iterator iter = zone_params.placement_pools.begin(); 
-         iter != zone_params.placement_pools.end(); ++iter) {
-      const string& placement_name = iter->first;
+    for (auto& pitem : zone_params.placement_pools) {
+      const string& placement_name = pitem.first;
       if (placement_targets.find(placement_name) == placement_targets.end()) {
         RGWZoneGroupPlacementTarget placement_target;
         placement_target.name = placement_name;
@@ -296,7 +300,7 @@ void RGWZoneGroup::post_process_params()
 
 int RGWZoneGroup::remove_zone(const std::string& zone_id)
 {
-  map<string, RGWZone>::iterator iter = zones.find(zone_id);
+  auto iter = zones.find(zone_id);
   if (iter == zones.end()) {
     ldout(cct, 0) << "zone id " << zone_id << " is not a part of zonegroup "
         << name << dendl;
@@ -1097,7 +1101,7 @@ int RGWPeriod::update_latest_epoch(epoch_t epoch)
       return r;
     } else if (epoch <= info.epoch) {
       r = -EEXIST; // fail with EEXIST if epoch is not newer
-      ldout(cct, 1) << "found existing latest_epoch " << info.epoch
+      ldout(cct, 10) << "found existing latest_epoch " << info.epoch
           << " >= given epoch " << epoch << ", returning r=" << r << dendl;
       return r;
     } else {
@@ -1340,10 +1344,10 @@ void RGWPeriod::fork()
   realm_epoch++;
 }
 
-static int read_sync_status(RGWRados *store, rgw_meta_sync_status *sync_status)
+static int read_sync_status(rgw::sal::RGWRadosStore *store, rgw_meta_sync_status *sync_status)
 {
   // initialize a sync status manager to read the status
-  RGWMetaSyncStatusManager mgr(store, store->get_async_rados());
+  RGWMetaSyncStatusManager mgr(store, store->svc()->rados->get_async_processor());
   int r = mgr.init();
   if (r < 0) {
     return r;
@@ -1353,7 +1357,7 @@ static int read_sync_status(RGWRados *store, rgw_meta_sync_status *sync_status)
   return r;
 }
 
-int RGWPeriod::update_sync_status(RGWRados *store, /* for now */
+int RGWPeriod::update_sync_status(rgw::sal::RGWRadosStore *store, /* for now */
 				  const RGWPeriod &current_period,
                                   std::ostream& error_stream,
                                   bool force_if_stale)
@@ -1403,7 +1407,7 @@ int RGWPeriod::update_sync_status(RGWRados *store, /* for now */
   return 0;
 }
 
-int RGWPeriod::commit(RGWRados *store,
+int RGWPeriod::commit(rgw::sal::RGWRadosStore *store,
 		      RGWRealm& realm, const RGWPeriod& current_period,
                       std::ostream& error_stream, bool force_if_stale)
 {
@@ -1532,7 +1536,6 @@ int get_zones_pool_set(CephContext* cct,
     }
     if (zone.get_id() != my_zone_id) {
       pool_names.insert(zone.domain_root);
-      pool_names.insert(zone.metadata_heap);
       pool_names.insert(zone.control_pool);
       pool_names.insert(zone.gc_pool);
       pool_names.insert(zone.log_pool);
@@ -1554,6 +1557,7 @@ int get_zones_pool_set(CephContext* cct,
         }
 	pool_names.insert(iter.second.data_extra_pool);
       }
+      pool_names.insert(zone.oidc_pool);
     }
   }
   return 0;
@@ -1605,9 +1609,6 @@ int RGWZoneParams::fix_pool_names()
   }
 
   domain_root = fix_zone_pool_dup(pools, name, ".rgw.meta:root", domain_root);
-  if (!metadata_heap.name.empty()) {
-    metadata_heap = fix_zone_pool_dup(pools, name, ".rgw.meta:heap", metadata_heap);
-  }
   control_pool = fix_zone_pool_dup(pools, name, ".rgw.control", control_pool);
   gc_pool = fix_zone_pool_dup(pools, name ,".rgw.log:gc", gc_pool);
   lc_pool = fix_zone_pool_dup(pools, name ,".rgw.log:lc", lc_pool);
@@ -1621,6 +1622,7 @@ int RGWZoneParams::fix_pool_names()
   roles_pool = fix_zone_pool_dup(pools, name, ".rgw.meta:roles", roles_pool);
   reshard_pool = fix_zone_pool_dup(pools, name, ".rgw.log:reshard", reshard_pool);
   otp_pool = fix_zone_pool_dup(pools, name, ".rgw.otp", otp_pool);
+  oidc_pool = fix_zone_pool_dup(pools, name, ".rgw.meta:oidc", oidc_pool);
 
   for(auto& iter : placement_pools) {
     iter.second.index_pool = fix_zone_pool_dup(pools, name, "." + default_bucket_index_pool_suffix,
@@ -1759,7 +1761,7 @@ const string& RGWZoneParams::get_compression_type(const rgw_placement_rule& plac
   if (p == placement_pools.end()) {
     return NONE;
   }
-  const auto& type = p->second.get_compression_type(placement_rule.storage_class);
+  const auto& type = p->second.get_compression_type(placement_rule.get_storage_class());
   return !type.empty() ? type : NONE;
 }
 

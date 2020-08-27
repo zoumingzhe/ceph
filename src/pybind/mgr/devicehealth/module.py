@@ -9,7 +9,6 @@ import operator
 import rados
 from threading import Event
 from datetime import datetime, timedelta, date, time
-from six import iteritems
 
 TIME_FORMAT = '%Y%m%d-%H%M%S'
 
@@ -22,12 +21,14 @@ HEALTH_MESSAGES = {
     DEVICE_HEALTH_TOOMANY: 'Too many daemons are expected to fail soon',
 }
 
+MAX_SAMPLES=500
+
 
 class Module(MgrModule):
     MODULE_OPTIONS = [
         {
             'name': 'enable_monitoring',
-            'default': False,
+            'default': True,
             'type': 'bool',
             'desc': 'monitor device health metrics',
             'runtime': True,
@@ -314,7 +315,8 @@ class Module(MgrModule):
         if raw_smart_data:
             for device, raw_data in raw_smart_data.items():
                 data = self.extract_smart_features(raw_data)
-                self.put_device_metrics(ioctx, device, data)
+                if device and data:
+                    self.put_device_metrics(ioctx, device, data)
         ioctx.close()
         return 0, "", ""
 
@@ -339,7 +341,8 @@ class Module(MgrModule):
                     continue
                 did_device[device] = 1
                 data = self.extract_smart_features(raw_data)
-                self.put_device_metrics(ioctx, device, data)
+                if device and data:
+                    self.put_device_metrics(ioctx, device, data)
         ioctx.close()
         return 0, "", ""
 
@@ -358,7 +361,8 @@ class Module(MgrModule):
         if raw_smart_data:
             for device, raw_data in raw_smart_data.items():
                 data = self.extract_smart_features(raw_data)
-                self.put_device_metrics(ioctx, device, data)
+                if device and data:
+                    self.put_device_metrics(ioctx, device, data)
         ioctx.close()
         return 0, "", ""
 
@@ -383,6 +387,7 @@ class Module(MgrModule):
                     daemon_type, daemon_id, outb))
 
     def put_device_metrics(self, ioctx, devid, data):
+        assert devid
         old_key = datetime.utcnow() - timedelta(
             seconds=int(self.retention_period))
         prune = old_key.strftime(TIME_FORMAT)
@@ -391,7 +396,7 @@ class Module(MgrModule):
         erase = []
         try:
             with rados.ReadOpCtx() as op:
-                omap_iter, ret = ioctx.get_omap_keys(op, "", 500)  # fixme
+                omap_iter, ret = ioctx.get_omap_keys(op, "", MAX_SAMPLES)  # fixme
                 assert ret == 0
                 ioctx.operate_read_op(op, devid)
                 for key, _ in list(omap_iter):
@@ -416,24 +421,22 @@ class Module(MgrModule):
                 ioctx.remove_omap_keys(op, tuple(erase))
             ioctx.operate_write_op(op, devid)
 
-    def show_device_metrics(self, devid, sample):
-        # verify device exists
-        r = self.get("device " + devid)
-        if not r or 'device' not in r.keys():
-            return -errno.ENOENT, '', 'device ' + devid + ' not found'
-        # fetch metrics
+    def _get_device_metrics(self, devid, sample=None, min_sample=None):
         res = {}
         ioctx = self.open_connection(create_if_missing=False)
         if not ioctx:
-            return 0, json.dumps(res, indent=4), ''
+            return {}
         with ioctx:
             with rados.ReadOpCtx() as op:
-                omap_iter, ret = ioctx.get_omap_vals(op, "", sample or '', 500)  # fixme
+                omap_iter, ret = ioctx.get_omap_vals(op, min_sample or '', sample or '',
+                                                     MAX_SAMPLES)  # fixme
                 assert ret == 0
                 try:
                     ioctx.operate_read_op(op, devid)
                     for key, value in list(omap_iter):
                         if sample and key != sample:
+                            break
+                        if min_sample and key < min_sample:
                             break
                         try:
                             v = json.loads(value)
@@ -447,7 +450,15 @@ class Module(MgrModule):
                 except rados.Error as e:
                     self.log.exception("RADOS error reading omap: {0}".format(e))
                     raise
+        return res
 
+    def show_device_metrics(self, devid, sample):
+        # verify device exists
+        r = self.get("device " + devid)
+        if not r or 'device' not in r.keys():
+            return -errno.ENOENT, '', 'device ' + devid + ' not found'
+        # fetch metrics
+        res = self._get_device_metrics(devid, sample=sample)
         return 0, json.dumps(res, indent=4, sort_keys=True), ''
 
     def check_health(self):
@@ -547,12 +558,13 @@ class Module(MgrModule):
                 did += 1
             if to_mark_out:
                 self.mark_out_etc(to_mark_out)
-        for warning, ls in iteritems(health_warnings):
+        for warning, ls in health_warnings.items():
             n = len(ls)
             if n:
                 checks[warning] = {
                     'severity': 'warning',
                     'summary': HEALTH_MESSAGES[warning] % n,
+                    'count': len(ls),
                     'detail': ls,
                 }
         self.set_health_checks(checks)
@@ -582,7 +594,7 @@ class Module(MgrModule):
         }), '')
         r, outb, outs = result.wait()
         if r != 0:
-            self.log.warn('Could not mark OSD %s out. r: [%s], outb: [%s], outs: [%s]' % (osd_ids, r, outb, outs))
+            self.log.warning('Could not mark OSD %s out. r: [%s], outb: [%s], outs: [%s]' % (osd_ids, r, outb, outs))
         for osd_id in osd_ids:
             result = CommandResult('')
             self.send_command(result, 'mon', '', json.dumps({
@@ -593,7 +605,7 @@ class Module(MgrModule):
             }), '')
             r, outb, outs = result.wait()
             if r != 0:
-                self.log.warn('Could not set osd.%s primary-affinity, r: [%s], outs: [%s]' % (osd_id, r, outb, outs))
+                self.log.warning('Could not set osd.%s primary-affinity, r: [%s], outs: [%s]' % (osd_id, r, outb, outs))
 
     def extract_smart_features(self, raw):
         # FIXME: extract and normalize raw smartctl --json output and
@@ -603,9 +615,7 @@ class Module(MgrModule):
     def predict_lift_expectancy(self, devid):
         plugin_name = ''
         model = self.get_ceph_option('device_failure_prediction_mode')
-        if model and model.lower() == 'cloud':
-            plugin_name = 'diskprediction_cloud'
-        elif model and model.lower() == 'local':
+        if model and model.lower() == 'local':
             plugin_name = 'diskprediction_local'
         else:
             return -1, '', 'unable to enable any disk prediction model[local/cloud]'
@@ -619,9 +629,7 @@ class Module(MgrModule):
     def predict_all_devices(self):
         plugin_name = ''
         model = self.get_ceph_option('device_failure_prediction_mode')
-        if model and model.lower() == 'cloud':
-            plugin_name = 'diskprediction_cloud'
-        elif model and model.lower() == 'local':
+        if model and model.lower() == 'local':
             plugin_name = 'diskprediction_local'
         else:
             return -1, '', 'unable to enable any disk prediction model[local/cloud]'
@@ -631,3 +639,9 @@ class Module(MgrModule):
                 return self.remote(plugin_name, 'predict_all_devices')
         except:
             return -1, '', 'unable to invoke diskprediction local or remote plugin'
+
+    def get_recent_device_metrics(self, devid, min_sample):
+        return self._get_device_metrics(devid, min_sample=min_sample)
+
+    def get_time_format(self):
+        return TIME_FORMAT

@@ -1,17 +1,17 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #ifndef CEPH_RGW_KEYSTONE_H
 #define CEPH_RGW_KEYSTONE_H
 
 #include <type_traits>
+#include <string_view>
 
 #include <boost/optional.hpp>
-#include <boost/utility/string_ref.hpp>
 
 #include "rgw_common.h"
 #include "rgw_http_client.h"
-#include "common/Cond.h"
+#include "common/ceph_mutex.h"
 #include "global/global_init.h"
 
 #include <atomic>
@@ -45,11 +45,11 @@ public:
   virtual ApiVersion get_api_version() const noexcept = 0;
 
   virtual std::string get_admin_token() const noexcept = 0;
-  virtual boost::string_ref get_admin_user() const noexcept = 0;
+  virtual std::string_view get_admin_user() const noexcept = 0;
   virtual std::string get_admin_password() const noexcept = 0;
-  virtual boost::string_ref get_admin_tenant() const noexcept = 0;
-  virtual boost::string_ref get_admin_project() const noexcept = 0;
-  virtual boost::string_ref get_admin_domain() const noexcept = 0;
+  virtual std::string_view get_admin_tenant() const noexcept = 0;
+  virtual std::string_view get_admin_project() const noexcept = 0;
+  virtual std::string_view get_admin_domain() const noexcept = 0;
 };
 
 class CephCtxConfig : public Config {
@@ -70,21 +70,21 @@ public:
 
   std::string get_admin_token() const noexcept override;
 
-  boost::string_ref get_admin_user() const noexcept override {
+  std::string_view get_admin_user() const noexcept override {
     return g_ceph_context->_conf->rgw_keystone_admin_user;
   }
 
   std::string get_admin_password() const noexcept override;
 
-  boost::string_ref get_admin_tenant() const noexcept override {
+  std::string_view get_admin_tenant() const noexcept override {
     return g_ceph_context->_conf->rgw_keystone_admin_tenant;
   }
 
-  boost::string_ref get_admin_project() const noexcept override {
+  std::string_view get_admin_project() const noexcept override {
     return g_ceph_context->_conf->rgw_keystone_admin_project;
   }
 
-  boost::string_ref get_admin_domain() const noexcept override {
+  std::string_view get_admin_domain() const noexcept override {
     return g_ceph_context->_conf->rgw_keystone_admin_domain;
   }
 };
@@ -217,13 +217,12 @@ class TokenCache {
   std::map<std::string, token_entry> tokens;
   std::list<std::string> tokens_lru;
 
-  Mutex lock;
+  ceph::mutex lock = ceph::make_mutex("rgw::keystone::TokenCache");
 
   const size_t max;
 
   explicit TokenCache(const rgw::keystone::Config& config)
     : cct(g_ceph_context),
-      lock("rgw::keystone::TokenCache"),
       max(cct->_conf->rgw_keystone_token_cache_size) {
   }
 

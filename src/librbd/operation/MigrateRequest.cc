@@ -10,7 +10,7 @@
 #include "librbd/Utils.h"
 #include "librbd/deep_copy/ObjectCopyRequest.h"
 #include "librbd/io/AsyncOperation.h"
-#include "librbd/io/ImageRequestWQ.h"
+#include "librbd/io/ImageDispatcherInterface.h"
 #include "librbd/io/ObjectRequest.h"
 #include "osdc/Striper.h"
 #include <boost/lambda/bind.hpp>
@@ -40,7 +40,7 @@ public:
 
   int send() override {
     I &image_ctx = this->m_image_ctx;
-    ceph_assert(image_ctx.owner_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
     CephContext *cct = image_ctx.cct;
 
     if (image_ctx.exclusive_lock != nullptr &&
@@ -54,7 +54,6 @@ public:
   }
 
 private:
-  uint64_t m_object_size;
   ::SnapContext m_snapc;
   uint64_t m_object_no;
 
@@ -62,7 +61,7 @@ private:
 
   void start_async_op() {
     I &image_ctx = this->m_image_ctx;
-    ceph_assert(image_ctx.owner_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
     CephContext *cct = image_ctx.cct;
     ldout(cct, 10) << dendl;
 
@@ -70,7 +69,7 @@ private:
     m_async_op = new io::AsyncOperation();
     m_async_op->start_op(image_ctx);
 
-    if (!image_ctx.io_work_queue->writes_blocked()) {
+    if (!image_ctx.io_image_dispatcher->writes_blocked()) {
       migrate_object();
       return;
     }
@@ -81,7 +80,7 @@ private:
     m_async_op->finish_op();
     delete m_async_op;
     m_async_op = nullptr;
-    image_ctx.io_work_queue->wait_on_writes_unblocked(ctx);
+    image_ctx.io_image_dispatcher->wait_on_writes_unblocked(ctx);
   }
 
   void handle_start_async_op(int r) {
@@ -95,13 +94,13 @@ private:
       return;
     }
 
-    RWLock::RLocker owner_locker(image_ctx.owner_lock);
+    std::shared_lock owner_locker{image_ctx.owner_lock};
     start_async_op();
   }
 
   bool is_within_overlap_bounds() {
     I &image_ctx = this->m_image_ctx;
-    RWLock::RLocker image_locker(image_ctx.image_lock);
+    std::shared_lock image_locker{image_ctx.image_lock};
 
     auto overlap = std::min(image_ctx.size, image_ctx.migration_info.overlap);
     return overlap > 0 &&
@@ -110,7 +109,7 @@ private:
 
   void migrate_object() {
     I &image_ctx = this->m_image_ctx;
-    ceph_assert(image_ctx.owner_lock.is_locked());
+    ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
     CephContext *cct = image_ctx.cct;
 
     auto ctx = create_context_callback<
@@ -119,8 +118,8 @@ private:
     if (is_within_overlap_bounds()) {
       bufferlist bl;
       auto req = new io::ObjectWriteRequest<I>(&image_ctx, m_object_no, 0,
-                                               std::move(bl), m_snapc, 0, {},
-                                               ctx);
+                                               std::move(bl), m_snapc, 0, 0,
+                                               std::nullopt, {}, ctx);
 
       ldout(cct, 20) << "copyup object req " << req << ", object_no "
                      << m_object_no << dendl;
@@ -130,8 +129,8 @@ private:
       ceph_assert(image_ctx.parent != nullptr);
 
       auto req = deep_copy::ObjectCopyRequest<I>::create(
-        image_ctx.parent, &image_ctx, image_ctx.migration_info.snap_map,
-        m_object_no, image_ctx.migration_info.flatten, ctx);
+        image_ctx.parent, &image_ctx, 0, 0, image_ctx.migration_info.snap_map,
+        m_object_no, image_ctx.migration_info.flatten, nullptr, ctx);
 
       ldout(cct, 20) << "deep copy object req " << req << ", object_no "
                      << m_object_no << dendl;
@@ -158,7 +157,7 @@ private:
 template <typename I>
 void MigrateRequest<I>::send_op() {
   I &image_ctx = this->m_image_ctx;
-  ceph_assert(image_ctx.owner_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
   CephContext *cct = image_ctx.cct;
   ldout(cct, 10) << dendl;
 
@@ -182,7 +181,7 @@ template <typename I>
 void MigrateRequest<I>::migrate_objects() {
   I &image_ctx = this->m_image_ctx;
   CephContext *cct = image_ctx.cct;
-  ceph_assert(image_ctx.owner_lock.is_locked());
+  ceph_assert(ceph_mutex_is_locked(image_ctx.owner_lock));
 
   uint64_t overlap_objects = get_num_overlap_objects();
 
@@ -219,7 +218,7 @@ uint64_t MigrateRequest<I>::get_num_overlap_objects() {
   CephContext *cct = image_ctx.cct;
   ldout(cct, 10) << dendl;
 
-  RWLock::RLocker image_locker(image_ctx.image_lock);
+  std::shared_lock image_locker{image_ctx.image_lock};
 
   auto overlap = image_ctx.migration_info.overlap;
 

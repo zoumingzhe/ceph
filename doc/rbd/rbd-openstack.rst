@@ -16,7 +16,9 @@ quad-core processor. The following diagram depicts the OpenStack/Ceph
 technology stack.
 
 
-.. ditaa::  +---------------------------------------------------+
+.. ditaa::
+
+            +---------------------------------------------------+
             |                    OpenStack                      |
             +---------------------------------------------------+
             |                     libvirt                       |
@@ -47,7 +49,7 @@ Three parts of OpenStack integrate with Ceph's block devices:
   Cinder services.
 
 - **Guest Disks**: Guest disks are guest operating system disks. By default,
-  when you boot a virtual machine, its disk appears as a file on the filesystem
+  when you boot a virtual machine, its disk appears as a file on the file system
   of the hypervisor (usually under ``/var/lib/nova/instances/<uuid>/``). Prior
   to OpenStack Havana, the only way to boot a VM in Ceph was to use the
   boot-from-volume functionality of Cinder. However, now it is possible to boot
@@ -55,7 +57,10 @@ Three parts of OpenStack integrate with Ceph's block devices:
   advantageous because it allows you to perform maintenance operations easily
   with the live-migration process. Additionally, if your hypervisor dies it is
   also convenient to trigger ``nova evacuate`` and  run the virtual machine
-  elsewhere almost seamlessly.
+  elsewhere almost seamlessly. In doing so,
+  :ref:`exclusive locks <rbd-exclusive-locks>` prevent multiple
+  compute nodes from concurrently accessing the guest disk.
+
 
 You can use OpenStack Glance to store images in a Ceph Block Device, and you
 can use Cinder to boot a VM using a copy-on-write clone of an image.
@@ -77,16 +82,16 @@ By default, Ceph block devices use the ``rbd`` pool. You may use any available
 pool. We recommend creating a pool for Cinder and a pool for Glance. Ensure
 your Ceph cluster is running, then create the pools. ::
 
-    ceph osd pool create volumes 128
-    ceph osd pool create images 128
-    ceph osd pool create backups 128
-    ceph osd pool create vms 128
+    ceph osd pool create volumes
+    ceph osd pool create images
+    ceph osd pool create backups
+    ceph osd pool create vms
 
 See `Create a Pool`_ for detail on specifying the number of placement groups for
 your pools, and `Placement Groups`_ for details on the number of placement
 groups you should set for your pools.
 
-Newly created pools must initialized prior to use. Use the ``rbd`` tool
+Newly created pools must be initialized prior to use. Use the ``rbd`` tool
 to initialize the pools::
 
         rbd pool init volumes
@@ -128,9 +133,9 @@ Setup Ceph Client Authentication
 If you have `cephx authentication`_ enabled, create a new user for Nova/Cinder
 and Glance. Execute the following::
 
-    ceph auth get-or-create client.glance mon 'profile rbd' osd 'profile rbd pool=images'
-    ceph auth get-or-create client.cinder mon 'profile rbd' osd 'profile rbd pool=volumes, profile rbd pool=vms, profile rbd-read-only pool=images'
-    ceph auth get-or-create client.cinder-backup mon 'profile rbd' osd 'profile rbd pool=backups'
+    ceph auth get-or-create client.glance mon 'profile rbd' osd 'profile rbd pool=images' mgr 'profile rbd pool=images'
+    ceph auth get-or-create client.cinder mon 'profile rbd' osd 'profile rbd pool=volumes, profile rbd pool=vms, profile rbd-read-only pool=images' mgr 'profile rbd pool=volumes, profile rbd pool=vms'
+    ceph auth get-or-create client.cinder-backup mon 'profile rbd' osd 'profile rbd pool=backups' mgr 'profile rbd pool=backups'
 
 Add the keyrings for ``client.cinder``, ``client.glance``, and
 ``client.cinder-backup`` to the appropriate nodes and change their ownership::

@@ -3,10 +3,12 @@
 # to permit OSDs to complain about that.
 overrides:
   ceph:
-    log-whitelist:
+    log-ignorelist:
       - evicting unresponsive client
       - but it is still running
       - slow request
+      - MDS_CLIENT_LATE_RELEASE
+      - t responding to mclientcaps
 
 tasks:
   - cephfs_test_runner:

@@ -1,11 +1,10 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #ifndef RGW_PROCESS_H
 #define RGW_PROCESS_H
 
 #include "rgw_common.h"
-#include "rgw_rados.h"
 #include "rgw_acl.h"
 #include "rgw_auth_registry.h"
 #include "rgw_user.h"
@@ -33,7 +32,7 @@ namespace rgw::dmclock {
 }
 
 struct RGWProcessEnv {
-  RGWRados *store;
+  rgw::sal::RGWRadosStore *store;
   RGWREST *rest;
   OpsLogSocket *olog;
   int port;
@@ -47,7 +46,7 @@ class RGWProcess {
   deque<RGWRequest*> m_req_queue;
 protected:
   CephContext *cct;
-  RGWRados* store;
+  rgw::sal::RGWRadosStore* store;
   rgw_auth_registry_ptr_t auth_registry;
   OpsLogSocket* olog;
   ThreadPool m_tp;
@@ -59,7 +58,8 @@ protected:
 
   struct RGWWQ : public ThreadPool::WorkQueue<RGWRequest> {
     RGWProcess* process;
-    RGWWQ(RGWProcess* p, time_t timeout, time_t suicide_timeout, ThreadPool* tp)
+    RGWWQ(RGWProcess* p, ceph::timespan timeout, ceph::timespan suicide_timeout,
+	  ThreadPool* tp)
       : ThreadPool::WorkQueue<RGWRequest>("RGWWQ", timeout, suicide_timeout,
 					  tp), process(p) {}
 
@@ -101,8 +101,10 @@ public:
       conf(conf),
       sock_fd(-1),
       uri_prefix(pe->uri_prefix),
-      req_wq(this, g_conf()->rgw_op_thread_timeout,
-	     g_conf()->rgw_op_thread_suicide_timeout, &m_tp) {
+      req_wq(this,
+	     ceph::make_timespan(g_conf()->rgw_op_thread_timeout),
+	     ceph::make_timespan(g_conf()->rgw_op_thread_suicide_timeout),
+	     &m_tp) {
   }
   
   virtual ~RGWProcess() = default;
@@ -114,7 +116,7 @@ public:
     m_tp.pause();
   }
 
-  void unpause_with_new_config(RGWRados* const store,
+  void unpause_with_new_config(rgw::sal::RGWRadosStore* const store,
                                rgw_auth_registry_ptr_t auth_registry) {
     this->store = store;
     this->auth_registry = std::move(auth_registry);
@@ -173,7 +175,7 @@ public:
   void set_access_key(RGWAccessKey& key) { access_key = key; }
 };
 /* process stream request */
-extern int process_request(RGWRados* store,
+extern int process_request(rgw::sal::RGWRadosStore* store,
                            RGWREST* rest,
                            RGWRequest* req,
                            const std::string& frontend_prefix,

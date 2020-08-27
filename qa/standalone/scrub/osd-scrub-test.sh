@@ -134,7 +134,7 @@ function TEST_interval_changes() {
     local week="$(expr $day \* 7)"
     local min_interval=$day
     local max_interval=$week
-    local WAIT_FOR_UPDATE=2
+    local WAIT_FOR_UPDATE=15
 
     TESTDATA="testdata.$$"
 
@@ -185,6 +185,163 @@ function TEST_interval_changes() {
     check_dump_scrubs $primary "3 days" "3 week" || return 1
 
     teardown $dir || return 1
+}
+
+function TEST_scrub_extented_sleep() {
+    local dir=$1
+    local poolname=test
+    local OSDS=3
+    local objects=15
+
+    TESTDATA="testdata.$$"
+
+    setup $dir || return 1
+    run_mon $dir a --osd_pool_default_size=3 || return 1
+    run_mgr $dir x || return 1
+    local scrub_begin_hour=$(date -d '2 hour ago' +"%H" | sed 's/^0//')
+    local scrub_end_hour=$(date -d '1 hour ago' +"%H" | sed 's/^0//')
+    for osd in $(seq 0 $(expr $OSDS - 1))
+    do
+      run_osd $dir $osd --osd_scrub_sleep=0 \
+                        --osd_scrub_extended_sleep=10 \
+                        --bluestore_cache_autotune=false \
+                        --osd_scrub_begin_hour=$scrub_begin_hour \
+                        --osd_scrub_end_hour=$scrub_end_hour || return 1
+    done
+
+    # Create a pool with a single pg
+    create_pool $poolname 1 1
+    wait_for_clean || return 1
+
+    # Trigger a scrub on a PG
+    local pgid=$(get_pg $poolname SOMETHING)
+    local primary=$(get_primary $poolname SOMETHING)
+    local last_scrub=$(get_last_scrub_stamp $pgid)
+    ceph tell $pgid scrub || return 1
+
+    # Due to the long delay, the scrub should not be done within 3 seconds
+    for ((i=0; i < 3; i++)); do
+        if test "$(get_last_scrub_stamp $pgid)" '>' "$last_scrub" ; then
+            return 1
+        fi
+        sleep 1
+    done
+
+    teardown $dir || return 1
+}
+
+function _scrub_abort() {
+    local dir=$1
+    local poolname=test
+    local OSDS=3
+    local objects=1000
+    local type=$2
+
+    TESTDATA="testdata.$$"
+    if test $type = "scrub";
+    then
+      stopscrub="noscrub"
+      check="noscrub"
+    else
+      stopscrub="nodeep-scrub"
+      check="nodeep_scrub"
+    fi
+
+
+    setup $dir || return 1
+    run_mon $dir a --osd_pool_default_size=3 || return 1
+    run_mgr $dir x || return 1
+    for osd in $(seq 0 $(expr $OSDS - 1))
+    do
+      run_osd $dir $osd --osd_pool_default_pg_autoscale_mode=off \
+	      --osd_deep_scrub_randomize_ratio=0.0 \
+	      --osd_scrub_sleep=5.0 \
+	      --osd_scrub_interval_randomize_ratio=0  || return 1
+    done
+
+    # Create a pool with a single pg
+    create_pool $poolname 1 1
+    wait_for_clean || return 1
+    poolid=$(ceph osd dump | grep "^pool.*[']${poolname}[']" | awk '{ print $2 }')
+
+    dd if=/dev/urandom of=$TESTDATA bs=1032 count=1
+    for i in `seq 1 $objects`
+    do
+        rados -p $poolname put obj${i} $TESTDATA
+    done
+    rm -f $TESTDATA
+
+    local primary=$(get_primary $poolname obj1)
+    local pgid="${poolid}.0"
+
+    ceph tell $pgid $type || return 1
+    # deep-scrub won't start without scrub noticing
+    if [ "$type" = "deep_scrub" ];
+    then
+      ceph tell $pgid scrub || return 1
+    fi
+
+    # Wait for scrubbing to start
+    set -o pipefail
+    found="no"
+    for i in $(seq 0 200)
+    do
+      flush_pg_stats
+      if ceph pg dump pgs | grep  ^$pgid| grep -q "scrubbing"
+      then
+        found="yes"
+        #ceph pg dump pgs
+        break
+      fi
+    done
+    set +o pipefail
+
+    if test $found = "no";
+    then
+      echo "Scrubbing never started"
+      return 1
+    fi
+
+    ceph osd set $stopscrub
+
+    # Wait for scrubbing to end
+    set -o pipefail
+    for i in $(seq 0 200)
+    do
+      flush_pg_stats
+      if ceph pg dump pgs | grep ^$pgid | grep -q "scrubbing"
+      then
+        continue
+      fi
+      #ceph pg dump pgs
+      break
+    done
+    set +o pipefail
+
+    sleep 5
+
+    if ! grep "$check set, aborting" $dir/osd.${primary}.log
+    then
+      echo "Abort not seen in log"
+      return 1
+    fi
+
+    local last_scrub=$(get_last_scrub_stamp $pgid)
+    ceph osd unset noscrub
+    TIMEOUT=$(($objects / 2))
+    wait_for_scrub $pgid "$last_scrub" || return 1
+
+    teardown $dir || return 1
+}
+
+function TEST_scrub_abort() {
+    local dir=$1
+    _scrub_abort $dir scrub
+}
+
+function TEST_deep_scrub_abort() {
+    local dir=$1
+    _scrub_abort $dir deep_scrub
 }
 
 main osd-scrub-test "$@"

@@ -25,6 +25,7 @@
 #include "common/RefCountedObj.h"
 #include "common/ThrottleInterface.h"
 #include "common/config.h"
+#include "common/ref.h"
 #include "common/debug.h"
 #include "common/zipkin_trace.h"
 #include "include/ceph_assert.h" // Because intrusive_ptr clobbers our assert...
@@ -33,6 +34,10 @@
 #include "msg/Connection.h"
 #include "msg/MessageRef.h"
 #include "msg_types.h"
+
+#ifdef WITH_SEASTAR
+#  include "crimson/net/SocketConnection.h"
+#endif // WITH_SEASTAR
 
 // monitor internal
 #define MSG_MON_SCRUB              64
@@ -71,6 +76,7 @@
 #define MSG_OSD_ALIVE        73
 #define MSG_OSD_MARK_ME_DOWN 74
 #define MSG_OSD_FULL         75
+#define MSG_OSD_MARK_ME_DEAD 123
 
 // removed right after luminous
 //#define MSG_OSD_SUBOP        76
@@ -81,10 +87,13 @@
 #define MSG_OSD_BEACON       79
 
 #define MSG_OSD_PG_NOTIFY      80
+#define MSG_OSD_PG_NOTIFY2    130
 #define MSG_OSD_PG_QUERY       81
+#define MSG_OSD_PG_QUERY2     131
 #define MSG_OSD_PG_LOG         83
 #define MSG_OSD_PG_REMOVE      84
 #define MSG_OSD_PG_INFO        85
+#define MSG_OSD_PG_INFO2      132
 #define MSG_OSD_PG_TRIM        86
 
 #define MSG_PGSTATS            87
@@ -131,15 +140,18 @@
 
 #define MSG_OSD_PG_READY_TO_MERGE 122
 
+#define MSG_OSD_PG_LEASE        133
+#define MSG_OSD_PG_LEASE_ACK    134
+
 // *** MDS ***
 
 #define MSG_MDS_BEACON             100  // to monitor
-#define MSG_MDS_SLAVE_REQUEST      101
+#define MSG_MDS_PEER_REQUEST       101
 #define MSG_MDS_TABLE_REQUEST      102
 
                                 // 150 already in use (MSG_OSD_RECOVERY_RESERVE)
 
-#define MSG_MDS_RESOLVE            0x200
+#define MSG_MDS_RESOLVE            0x200 // 0x2xx are for mdcache of mds
 #define MSG_MDS_RESOLVEACK         0x201
 #define MSG_MDS_CACHEREJOIN        0x202
 #define MSG_MDS_DISCOVER           0x203
@@ -157,10 +169,10 @@
 #define MSG_MDS_OPENINOREPLY       0x210
 #define MSG_MDS_SNAPUPDATE         0x211
 #define MSG_MDS_FRAGMENTNOTIFYACK  0x212
-#define MSG_MDS_LOCK               0x300
+#define MSG_MDS_LOCK               0x300 // 0x3xx are for locker of mds
 #define MSG_MDS_INODEFILECAPS      0x301
 
-#define MSG_MDS_EXPORTDIRDISCOVER     0x449
+#define MSG_MDS_EXPORTDIRDISCOVER     0x449 // 0x4xx are for migrator of mds
 #define MSG_MDS_EXPORTDIRDISCOVERACK  0x450
 #define MSG_MDS_EXPORTDIRCANCEL       0x451
 #define MSG_MDS_EXPORTDIRPREP         0x452
@@ -178,6 +190,8 @@
 #define MSG_MDS_GATHERCAPS            0x472
 
 #define MSG_MDS_HEARTBEAT          0x500  // for mds load balancer
+#define MSG_MDS_METRICS            0x501  // for mds metric aggregator
+#define MSG_MDS_PING               0x502  // for mds pinger
 
 // *** generic ***
 #define MSG_TIMECHECK             0x600
@@ -213,12 +227,21 @@
 #define MSG_SERVICE_MAP           0x707
 
 #define MSG_MGR_CLOSE             0x708
+#define MSG_MGR_COMMAND           0x709
+#define MSG_MGR_COMMAND_REPLY     0x70a
 
 // ======================================================
 
 // abstract Message class
 
 class Message : public RefCountedObject {
+public:
+#ifdef WITH_SEASTAR
+  using ConnectionRef = crimson::net::ConnectionRef;
+#else
+  using ConnectionRef = ::ConnectionRef;
+#endif // WITH_SEASTAR
+
 protected:
   ceph_msg_header  header;      // headerelope
   ceph_msg_footer  footer;
@@ -315,8 +338,8 @@ protected:
   }
 public:
   const ConnectionRef& get_connection() const { return connection; }
-  void set_connection(const ConnectionRef& c) {
-    connection = c;
+  void set_connection(ConnectionRef c) {
+    connection = std::move(c);
   }
   CompletionHook* get_completion_hook() { return completion_hook; }
   void set_completion_hook(CompletionHook *hook) { completion_hook = hook; }
@@ -375,7 +398,7 @@ public:
   void set_payload(ceph::buffer::list& bl) {
     if (byte_throttler)
       byte_throttler->put(payload.length());
-    payload.claim(bl, ceph::buffer::list::CLAIM_ALLOW_NONSHAREABLE);
+    payload = std::move(bl);
     if (byte_throttler)
       byte_throttler->take(payload.length());
   }
@@ -383,7 +406,7 @@ public:
   void set_middle(ceph::buffer::list& bl) {
     if (byte_throttler)
       byte_throttler->put(middle.length());
-    middle.claim(bl, ceph::buffer::list::CLAIM_ALLOW_NONSHAREABLE);
+    middle = std::move(bl);
     if (byte_throttler)
       byte_throttler->take(middle.length());
   }
@@ -399,11 +422,10 @@ public:
 
   const ceph::buffer::list& get_data() const { return data; }
   ceph::buffer::list& get_data() { return data; }
-  void claim_data(ceph::buffer::list& bl,
-		  unsigned int flags = ceph::buffer::list::CLAIM_DEFAULT) {
+  void claim_data(ceph::buffer::list& bl) {
     if (byte_throttler)
       byte_throttler->put(data.length());
-    bl.claim(data, flags);
+    bl = std::move(data);
   }
   off_t get_data_len() const { return data.length(); }
 
@@ -490,11 +512,14 @@ public:
   void encode(uint64_t features, int crcflags, bool skip_header_crc = false);
 };
 
-extern Message *decode_message(CephContext *cct, int crcflags,
-			       ceph_msg_header &header,
-			       ceph_msg_footer& footer, ceph::buffer::list& front,
-			       ceph::buffer::list& middle, ceph::buffer::list& data,
-			       Connection* conn);
+extern Message *decode_message(CephContext *cct,
+                               int crcflags,
+                               ceph_msg_header& header,
+                               ceph_msg_footer& footer,
+                               ceph::buffer::list& front,
+                               ceph::buffer::list& middle,
+                               ceph::buffer::list& data,
+                               Message::ConnectionRef conn);
 inline std::ostream& operator<<(std::ostream& out, const Message& m) {
   m.print(out);
   if (m.get_header().version)
@@ -519,22 +544,8 @@ private:
 };
 
 namespace ceph {
-template<typename T> using ref_t = boost::intrusive_ptr<T>;
-template<typename T> using cref_t = boost::intrusive_ptr<const T>;
-template<class T, class U>
-boost::intrusive_ptr<T> ref_cast(const boost::intrusive_ptr<U>& r) noexcept {
-  return static_cast<T*>(r.get());
-}
-template<class T, class U>
-boost::intrusive_ptr<T> ref_cast(boost::intrusive_ptr<U>&& r) noexcept {
-  return {static_cast<T*>(r.detach()), false};
-}
-template<class T, class U>
-boost::intrusive_ptr<const T> ref_cast(const boost::intrusive_ptr<const U>& r) noexcept {
-  return static_cast<const T*>(r.get());
-}
 template<class T, typename... Args>
-boost::intrusive_ptr<T> make_message(Args&&... args) {
+ceph::ref_t<T> make_message(Args&&... args) {
   return {new T(std::forward<Args>(args)...), false};
 }
 }

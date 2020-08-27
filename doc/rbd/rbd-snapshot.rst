@@ -12,19 +12,21 @@ quickly and easily. Ceph supports block device snapshots using the ``rbd``
 command and many higher level interfaces, including `QEMU`_, `libvirt`_, 
 `OpenStack`_ and `CloudStack`_.
 
-.. important:: To use use RBD snapshots, you must have a running Ceph cluster.
+.. important:: To use RBD snapshots, you must have a running Ceph cluster.
 
-.. note:: Because RBD does not know about the filesystem, snapshots are
+.. note:: Because RBD does not know about the file system, snapshots are
 	  `crash-consistent` if they are not coordinated with the mounting
 	  computer. So, we recommend you stop `I/O` before taking a snapshot of
-	  an image. If the image contains a filesystem, the filesystem must be
+	  an image. If the image contains a file system, the file system must be
 	  in a consistent state before taking a snapshot or you may have to run
 	  `fsck`. To stop `I/O` you can use `fsfreeze` command. See
 	  `fsfreeze(8)` man page for more details.
 	  For virtual machines, `qemu-guest-agent` can be used to automatically
-	  freeze filesystems when creating a snapshot.
+	  freeze file systems when creating a snapshot.
 
-.. ditaa:: +------------+         +-------------+
+.. ditaa::
+
+           +------------+         +-------------+
            | {s}        |         | {s} c999    |
            |   Active   |<-------*|   Snapshot  |
            |   Image    |         |   of Image  |
@@ -147,7 +149,9 @@ so cloning a snapshot simplifies semantics--making it possible to create
 clones rapidly.
 
 
-.. ditaa:: +-------------+              +-------------+
+.. ditaa::
+
+           +-------------+              +-------------+
            | {s} c999    |              | {s}         |
            |  Snapshot   | Child refers |  COW Clone  |
            |  of Image   |<------------*| of Snapshot |
@@ -181,7 +185,9 @@ Ceph block device layering is a simple process. You must have an image. You must
 create a snapshot of the image. You must protect the snapshot. Once you have 
 performed these steps, you can begin cloning the snapshot.
 
-.. ditaa:: +----------------------------+        +-----------------------------+
+.. ditaa::
+
+           +----------------------------+        +-----------------------------+
            |                            |        |                             |
            | Create Block Device Image  |------->|      Create a Snapshot      |
            |                            |        |                             |

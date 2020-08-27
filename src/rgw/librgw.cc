@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -37,7 +37,6 @@
 #include "common/common_init.h"
 #include "common/dout.h"
 
-#include "rgw_rados.h"
 #include "rgw_resolve.h"
 #include "rgw_op.h"
 #include "rgw_rest.h"
@@ -54,6 +53,8 @@
 #include "rgw_http_client.h"
 #include "rgw_http_client_curl.h"
 #include "rgw_perf_counters.h"
+
+#include "services/svc_zone.h"
 
 #include <errno.h>
 #include <thread>
@@ -234,7 +235,7 @@ namespace rgw {
 
     RGWObjectCtx rados_ctx(store, s); // XXX holds std::map
 
-    auto sysobj_ctx = store->svc.sysobj->init_obj_ctx();
+    auto sysobj_ctx = store->svc()->sysobj->init_obj_ctx();
     s->sysobj_ctx = &sysobj_ctx;
 
     /* XXX and -then- stash req_state pointers everywhere they are needed */
@@ -301,7 +302,7 @@ namespace rgw {
       if (ret < 0) {
 	if (s->system_request) {
 	  dout(2) << "overriding permissions due to system operation" << dendl;
-	} else if (s->auth.identity->is_admin_of(s->user->user_id)) {
+	} else if (s->auth.identity->is_admin_of(s->user->get_id())) {
 	  dout(2) << "overriding permissions due to admin operation" << dendl;
 	} else {
 	  abort_req(s, op, ret);
@@ -334,7 +335,7 @@ namespace rgw {
               << e.what() << dendl;
     }
     if (should_log) {
-      rgw_log_op(store, nullptr /* !rest */, s,
+      rgw_log_op(store->getRados(), nullptr /* !rest */, s,
 		 (op ? op->name() : "unknown"), olog);
     }
 
@@ -421,7 +422,7 @@ namespace rgw {
     if (ret < 0) {
       if (s->system_request) {
 	dout(2) << "overriding permissions due to system operation" << dendl;
-      } else if (s->auth.identity->is_admin_of(s->user->user_id)) {
+      } else if (s->auth.identity->is_admin_of(s->user->get_id())) {
 	dout(2) << "overriding permissions due to admin operation" << dendl;
       } else {
 	abort_req(s, op, ret);
@@ -491,12 +492,12 @@ namespace rgw {
 		      CODE_ENVIRONMENT_DAEMON,
 		      CINIT_FLAG_UNPRIVILEGED_DAEMON_DEFAULTS);
 
-    Mutex mutex("main");
+    ceph::mutex mutex = ceph::make_mutex("main");
     SafeTimer init_timer(g_ceph_context, mutex);
     init_timer.init();
-    mutex.Lock();
+    mutex.lock();
     init_timer.add_event_after(g_conf()->rgw_init_timeout, new C_InitTimeout);
-    mutex.Unlock();
+    mutex.unlock();
 
     common_init_finish(g_ceph_context);
 
@@ -506,18 +507,34 @@ namespace rgw {
     rgw::curl::setup_curl(boost::none);
     rgw_http_client_init(g_ceph_context);
 
+    auto run_gc =
+      g_conf()->rgw_enable_gc_threads &&
+      g_conf()->rgw_nfs_run_gc_threads;
+
+    auto run_lc =
+      g_conf()->rgw_enable_lc_threads &&
+      g_conf()->rgw_nfs_run_lc_threads;
+
+    auto run_quota =
+      g_conf()->rgw_enable_quota_threads &&
+      g_conf()->rgw_nfs_run_quota_threads;
+
+    auto run_sync =
+      g_conf()->rgw_run_sync_thread &&
+      g_conf()->rgw_nfs_run_sync_thread;
+
     store = RGWStoreManager::get_storage(g_ceph_context,
-					 g_conf()->rgw_enable_gc_threads,
-					 g_conf()->rgw_enable_lc_threads,
-					 g_conf()->rgw_enable_quota_threads,
-					 g_conf()->rgw_run_sync_thread,
+					 run_gc,
+					 run_lc,
+					 run_quota,
+					 run_sync,
 					 g_conf().get_val<bool>("rgw_dynamic_resharding"));
 
     if (!store) {
-      mutex.Lock();
+      mutex.lock();
       init_timer.cancel_all_events();
       init_timer.shutdown();
-      mutex.Unlock();
+      mutex.unlock();
 
       derr << "Couldn't init storage provider (RADOS)" << dendl;
       return -EIO;
@@ -525,12 +542,12 @@ namespace rgw {
 
     r = rgw_perf_start(g_ceph_context);
 
-    rgw_rest_init(g_ceph_context, store, store->svc.zone->get_zonegroup());
+    rgw_rest_init(g_ceph_context, store->svc()->zone->get_zonegroup());
 
-    mutex.Lock();
+    mutex.lock();
     init_timer.cancel_all_events();
     init_timer.shutdown();
-    mutex.Unlock();
+    mutex.unlock();
 
     if (r)
       return -EIO;
@@ -548,9 +565,7 @@ namespace rgw {
     ldh->init();
     ldh->bind();
 
-    rgw_user_init(store);
-    rgw_bucket_init(store->meta_mgr);
-    rgw_log_usage_init(g_ceph_context, store);
+    rgw_log_usage_init(g_ceph_context, store->getRados());
 
     // XXX ex-RGWRESTMgr_lib, mgr->set_logging(true)
 
@@ -582,7 +597,7 @@ namespace rgw {
 
     fe->run();
 
-    r = store->register_to_service_map("rgw-nfs", service_map_meta);
+    r = store->getRados()->register_to_service_map("rgw-nfs", service_map_meta);
     if (r < 0) {
       derr << "ERROR: failed to register to service map: " << cpp_strerror(-r) << dendl;
       /* ignore error */
@@ -625,9 +640,9 @@ namespace rgw {
     return 0;
   } /* RGWLib::stop() */
 
-  int RGWLibIO::set_uid(RGWRados *store, const rgw_user& uid)
+  int RGWLibIO::set_uid(rgw::sal::RGWRadosStore *store, const rgw_user& uid)
   {
-    int ret = rgw_get_user_info_by_uid(store, uid, user_info, NULL);
+    int ret = store->ctl()->user->get_info_by_uid(uid, &user_info, null_yield);
     if (ret < 0) {
       derr << "ERROR: failed reading user info: uid=" << uid << " ret="
 	   << ret << dendl;
@@ -677,8 +692,8 @@ namespace rgw {
     s->perm_mask = RGW_PERM_FULL_CONTROL;
 
     // populate the owner info
-    s->owner.set_id(s->user->user_id);
-    s->owner.set_name(s->user->display_name);
+    s->owner.set_id(s->user->get_id());
+    s->owner.set_name(s->user->get_display_name());
 
     return 0;
   } /* RGWHandler_Lib::authorize */

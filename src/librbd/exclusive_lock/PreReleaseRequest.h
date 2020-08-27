@@ -16,10 +16,14 @@ struct ImageCtx;
 
 namespace exclusive_lock {
 
+template <typename> struct ImageDispatch;
+
 template <typename ImageCtxT = ImageCtx>
 class PreReleaseRequest {
 public:
-  static PreReleaseRequest* create(ImageCtxT &image_ctx, bool shutting_down,
+  static PreReleaseRequest* create(ImageCtxT &image_ctx,
+                                   ImageDispatch<ImageCtxT>* image_dispatch,
+                                   bool shutting_down,
                                    AsyncOpTracker &async_op_tracker,
                                    Context *on_finish);
 
@@ -45,6 +49,9 @@ private:
    * WAIT_FOR_OPS
    *    |
    *    v
+   * SHUT_DOWN_IMAGE_CACHE
+   *    |
+   *    v
    * INVALIDATE_CACHE
    *    |
    *    v
@@ -62,10 +69,13 @@ private:
    * @endverbatim
    */
 
-  PreReleaseRequest(ImageCtxT &image_ctx, bool shutting_down,
-                    AsyncOpTracker &async_op_tracker, Context *on_finish);
+  PreReleaseRequest(ImageCtxT &image_ctx,
+                    ImageDispatch<ImageCtxT>* image_dispatch,
+                    bool shutting_down, AsyncOpTracker &async_op_tracker,
+                    Context *on_finish);
 
   ImageCtxT &m_image_ctx;
+  ImageDispatch<ImageCtxT>* m_image_dispatch;
   bool m_shutting_down;
   AsyncOpTracker &m_async_op_tracker;
   Context *m_on_finish;
@@ -86,6 +96,9 @@ private:
 
   void send_wait_for_ops();
   void handle_wait_for_ops(int r);
+
+  void send_shut_down_image_cache();
+  void handle_shut_down_image_cache(int r);
 
   void send_invalidate_cache();
   void handle_invalidate_cache(int r);

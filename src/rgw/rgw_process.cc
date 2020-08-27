@@ -1,12 +1,11 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #include "common/errno.h"
 #include "common/Throttle.h"
 #include "common/WorkQueue.h"
 #include "include/scope_guard.h"
 
-#include "rgw_rados.h"
 #include "rgw_dmclock_scheduler.h"
 #include "rgw_rest.h"
 #include "rgw_frontend.h"
@@ -48,8 +47,12 @@ auto schedule_request(Scheduler *scheduler, req_state *s, RGWOp *op)
 
   const auto client = op->dmclock_client();
   const auto cost = op->dmclock_cost();
-  ldpp_dout(op,10) << "scheduling with dmclock client=" << static_cast<int>(client)
-		   << " cost=" << cost << dendl;
+  if (s->cct->_conf->subsys.should_gather(ceph_subsys_rgw, 10)) {
+    ldpp_dout(op,10) << "scheduling with "
+		     << s->cct->_conf.get_val<std::string>("rgw_scheduler_type")
+		     << " client=" << static_cast<int>(client)
+		     << " cost=" << cost << dendl;
+  }
   return scheduler->schedule_request(client, {},
                                      req_state::Clock::to_double(s->time),
                                      cost,
@@ -141,7 +144,7 @@ int rgw_process_authenticated(RGWHandler_REST * const handler,
   if (ret < 0) {
     if (s->system_request) {
       dout(2) << "overriding permissions due to system operation" << dendl;
-    } else if (s->auth.identity->is_admin_of(s->user->user_id)) {
+    } else if (s->auth.identity->is_admin_of(s->user->get_id())) {
       dout(2) << "overriding permissions due to admin operation" << dendl;
     } else {
       return ret;
@@ -166,7 +169,7 @@ int rgw_process_authenticated(RGWHandler_REST * const handler,
   return 0;
 }
 
-int process_request(RGWRados* const store,
+int process_request(rgw::sal::RGWRadosStore* const store,
                     RGWREST* const rest,
                     RGWRequest* const req,
                     const std::string& frontend_prefix,
@@ -185,15 +188,15 @@ int process_request(RGWRados* const store,
 
   RGWEnv& rgw_env = client_io->get_env();
 
-  RGWUserInfo userinfo;
+  rgw::sal::RGWRadosUser user(store);
 
-  struct req_state rstate(g_ceph_context, &rgw_env, &userinfo, req->id);
+  struct req_state rstate(g_ceph_context, &rgw_env, &user, req->id);
   struct req_state *s = &rstate;
 
   RGWObjectCtx rados_ctx(store, s);
   s->obj_ctx = &rados_ctx;
 
-  auto sysobj_ctx = store->svc.sysobj->init_obj_ctx();
+  auto sysobj_ctx = store->svc()->sysobj->init_obj_ctx();
   s->sysobj_ctx = &sysobj_ctx;
 
   if (ret < 0) {
@@ -202,9 +205,9 @@ int process_request(RGWRados* const store,
     return ret;
   }
 
-  s->req_id = store->svc.zone_utils->unique_id(req->id);
-  s->trans_id = store->svc.zone_utils->unique_trans_id(req->id);
-  s->host_id = store->host_id;
+  s->req_id = store->svc()->zone_utils->unique_id(req->id);
+  s->trans_id = store->svc()->zone_utils->unique_trans_id(req->id);
+  s->host_id = store->getRados()->host_id;
   s->yield = yield;
 
   ldpp_dout(s, 2) << "initializing for trans_id = " << s->trans_id << dendl;
@@ -227,7 +230,7 @@ int process_request(RGWRados* const store,
   should_log = mgr->get_logging();
 
   ldpp_dout(s, 2) << "getting op " << s->op << dendl;
-  op = handler->get_op(store);
+  op = handler->get_op();
   if (!op) {
     abort_early(s, NULL, -ERR_METHOD_NOT_ALLOWED, handler);
     goto done;
@@ -269,8 +272,8 @@ int process_request(RGWRados* const store,
       goto done;
     }
 
-    if (s->user->suspended) {
-      dout(10) << "user is suspended, uid=" << s->user->user_id << dendl;
+    if (s->user->get_info().suspended) {
+      dout(10) << "user is suspended, uid=" << s->user->get_id() << dendl;
       abort_early(s, op, -ERR_USER_SUSPENDED, handler);
       goto done;
     }
@@ -294,7 +297,7 @@ done:
   }
 
   if (should_log) {
-    rgw_log_op(store, rest, s, (op ? op->name() : "unknown"), olog);
+    rgw_log_op(store->getRados(), rest, s, (op ? op->name() : "unknown"), olog);
   }
 
   if (http_ret != nullptr) {

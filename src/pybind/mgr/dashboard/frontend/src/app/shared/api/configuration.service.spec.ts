@@ -15,8 +15,8 @@ describe('ConfigurationService', () => {
   });
 
   beforeEach(() => {
-    service = TestBed.get(ConfigurationService);
-    httpTesting = TestBed.get(HttpTestingController);
+    service = TestBed.inject(ConfigurationService);
+    httpTesting = TestBed.inject(HttpTestingController);
   });
 
   afterEach(() => {
@@ -76,5 +76,24 @@ describe('ConfigurationService', () => {
     service.delete('testOption', 'testSection').subscribe();
     const reg = httpTesting.expectOne('api/cluster_conf/testOption?section=testSection');
     expect(reg.request.method).toBe('DELETE');
+  });
+
+  it('should get value', () => {
+    const config = {
+      default: 'a',
+      value: [
+        { section: 'global', value: 'b' },
+        { section: 'mon', value: 'c' },
+        { section: 'mon.1', value: 'd' },
+        { section: 'mds', value: 'e' }
+      ]
+    };
+    expect(service.getValue(config, 'mon.1')).toBe('d');
+    expect(service.getValue(config, 'mon')).toBe('c');
+    expect(service.getValue(config, 'mds.1')).toBe('e');
+    expect(service.getValue(config, 'mds')).toBe('e');
+    expect(service.getValue(config, 'osd')).toBe('b');
+    config.value = [];
+    expect(service.getValue(config, 'osd')).toBe('a');
   });
 });

@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
+from typing import Any, Dict, Union
 
+import logging
 import cherrypy
 
 from . import Controller, BaseController, Endpoint, ENDPOINT_MAP
-from .. import logger, mgr
+from .. import mgr
 
 from ..tools import str_to_bool
+
+
+logger = logging.getLogger('controllers.docs')
 
 
 @Controller('/docs', secure=False)
@@ -27,7 +32,7 @@ class Docs(BaseController):
                 if endpoint.is_api or all_endpoints:
                     list_of_ctrl.add(endpoint.ctrl)
 
-        TAG_MAP = {}
+        tag_map: Dict[str, str] = {}
         for ctrl in list_of_ctrl:
             tag_name = ctrl.__name__
             tag_descr = ""
@@ -35,11 +40,11 @@ class Docs(BaseController):
                 if ctrl.doc_info['tag']:
                     tag_name = ctrl.doc_info['tag']
                 tag_descr = ctrl.doc_info['tag_descr']
-            if tag_name not in TAG_MAP or not TAG_MAP[tag_name]:
-                TAG_MAP[tag_name] = tag_descr
+            if tag_name not in tag_map or not tag_map[tag_name]:
+                tag_map[tag_name] = tag_descr
 
         tags = [{'name': k, 'description': v if v else "*No description available*"}
-                for k, v in TAG_MAP.items()]
+                for k, v in tag_map.items()]
         tags.sort(key=lambda e: e['name'])
         return tags
 
@@ -179,7 +184,7 @@ class Docs(BaseController):
 
     @classmethod
     def _gen_responses(cls, method, resp_object=None):
-        resp = {
+        resp: Dict[str, Dict[str, Union[str, Any]]] = {
             '400': {
                 "description": "Operation exception. Please check the "
                                "response body for details."
@@ -248,8 +253,9 @@ class Docs(BaseController):
         return parameters
 
     @classmethod
-    def _gen_paths(cls, all_endpoints, baseUrl):
-        METHOD_ORDER = ['get', 'post', 'put', 'delete']
+    def _gen_paths(cls, all_endpoints):
+        # pylint: disable=R0912
+        method_order = ['get', 'post', 'put', 'delete']
         paths = {}
         for path, endpoints in sorted(list(ENDPOINT_MAP.items()),
                                       key=lambda p: p[0]):
@@ -257,7 +263,7 @@ class Docs(BaseController):
             skip = False
 
             endpoint_list = sorted(endpoints, key=lambda e:
-                                   METHOD_ORDER.index(e.method.lower()))
+                                   method_order.index(e.method.lower()))
             for endpoint in endpoint_list:
                 if not endpoint.is_api and not all_endpoints:
                     skip = True
@@ -300,11 +306,18 @@ class Docs(BaseController):
                                 'application/json': {
                                     'schema': cls._gen_schema_for_content(body_params)}}}
 
+                    if endpoint.query_params:
+                        query_params = cls._add_param_info(endpoint.query_params, p_info)
+                        methods[method.lower()]['requestBody'] = {
+                            'content': {
+                                'application/json': {
+                                    'schema': cls._gen_schema_for_content(query_params)}}}
+
                 if endpoint.is_secure:
                     methods[method.lower()]['security'] = [{'jwt': []}]
 
             if not skip:
-                paths[path[len(baseUrl):]] = methods
+                paths[path] = methods
 
         return paths
 
@@ -314,9 +327,9 @@ class Docs(BaseController):
 
         host = cherrypy.request.base
         host = host[host.index(':')+3:]
-        logger.debug("DOCS: Host: %s", host)
+        logger.debug("Host: %s", host)
 
-        paths = self._gen_paths(all_endpoints, base_url)
+        paths = self._gen_paths(all_endpoints)
 
         if not base_url:
             base_url = "/"
@@ -359,11 +372,11 @@ class Docs(BaseController):
 
     @Endpoint(path="api.json")
     def api_json(self):
-        return self._gen_spec(False, "/api")
+        return self._gen_spec(False, "/")
 
     @Endpoint(path="api-all.json")
     def api_all_json(self):
-        return self._gen_spec(True, "/api")
+        return self._gen_spec(True, "/")
 
     def _swagger_ui_page(self, all_endpoints=False, token=None):
         base = cherrypy.request.base
@@ -393,11 +406,8 @@ class Docs(BaseController):
         <head>
             <meta charset="UTF-8">
             <meta name="referrer" content="no-referrer" />
-            <link href="https://fonts.googleapis.com/css?family=Open+Sans:400, \
-                        700|Source+Code+Pro:300,600|Titillium+Web:400,600,700"
-                  rel="stylesheet">
             <link rel="stylesheet" type="text/css"
-                  href="//unpkg.com/swagger-ui-dist@3/swagger-ui.css" >
+                  href="/swagger-ui.css" >
             <style>
                 html
                 {{
@@ -419,7 +429,7 @@ class Docs(BaseController):
         </head>
         <body>
         <div id="swagger-ui"></div>
-        <script src="//unpkg.com/swagger-ui-dist@3/swagger-ui-bundle.js">
+        <script src="/swagger-ui-bundle.js">
         </script>
         <script>
             window.onload = function() {{

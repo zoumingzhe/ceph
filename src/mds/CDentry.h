@@ -9,10 +9,8 @@
  * modify it under the terms of the GNU Lesser General Public
  * License version 2.1, as published by the Free Software 
  * Foundation.  See file COPYING.
- * 
+ *
  */
-
-
 
 #ifndef CEPH_CDENTRY_H
 #define CEPH_CDENTRY_H
@@ -28,10 +26,11 @@
 #include "include/elist.h"
 #include "include/filepath.h"
 
+#include "BatchOp.h"
 #include "MDSCacheObject.h"
 #include "MDSContext.h"
 #include "SimpleLock.h"
-#include "LocalLock.h"
+#include "LocalLockC.h"
 #include "ScrubHeader.h"
 
 class CInode;
@@ -41,8 +40,6 @@ class CDentry;
 class LogSegment;
 
 class Session;
-
-
 
 // define an ordering
 bool operator<(const CDentry& l, const CDentry& r);
@@ -122,6 +119,10 @@ public:
   {
     linkage.remote_ino = ino;
     linkage.remote_d_type = dt;
+  }
+
+  ~CDentry() override {
+    ceph_assert(batch_ops.empty());
   }
 
   std::string_view pin_name(int p) const override {
@@ -236,29 +237,18 @@ public:
 
   version_t pre_dirty(version_t min=0);
   void _mark_dirty(LogSegment *ls);
-  void mark_dirty(version_t projected_dirv, LogSegment *ls);
+  void mark_dirty(version_t pv, LogSegment *ls);
   void mark_clean();
 
   void mark_new();
   bool is_new() const { return state_test(STATE_NEW); }
   void clear_new() { state_clear(STATE_NEW); }
   
-  // -- replication
-  void encode_replica(mds_rank_t mds, bufferlist& bl, bool need_recover) {
-    __u32 nonce = add_replica(mds);
-    encode(nonce, bl);
-    encode(first, bl);
-    encode(linkage.remote_ino, bl);
-    encode(linkage.remote_d_type, bl);
-    lock.encode_state_for_replica(bl);
-    encode(need_recover, bl);
-  }
-  void decode_replica(bufferlist::const_iterator& p, bool is_new);
-
   // -- exporting
   // note: this assumes the dentry already exists.  
   // i.e., the name is already extracted... so we just need the other state.
-  void encode_export(bufferlist& bl) {
+  void encode_export(ceph::buffer::list& bl) {
+    ENCODE_START(1, 1, bl);
     encode(first, bl);
     encode(state, bl);
     encode(version, bl);
@@ -266,6 +256,7 @@ public:
     encode(lock, bl);
     encode(get_replicas(), bl);
     get(PIN_TEMPEXPORTING);
+    ENCODE_FINISH(bl);
   }
   void finish_export() {
     // twiddle
@@ -279,7 +270,8 @@ public:
   void abort_export() {
     put(PIN_TEMPEXPORTING);
   }
-  void decode_import(bufferlist::const_iterator& blp, LogSegment *ls) {
+  void decode_import(ceph::buffer::list::const_iterator& blp, LogSegment *ls) {
+    DECODE_START(1, blp);
     decode(first, blp);
     __u32 nstate;
     decode(nstate, blp);
@@ -296,6 +288,7 @@ public:
     if (is_replicated())
       get(PIN_REPLICATED);
     replica_nonce = 0;
+    DECODE_FINISH(blp);
   }
 
   // -- locking --
@@ -304,8 +297,8 @@ public:
     return &lock;
   }
   void set_object_info(MDSCacheObjectInfo &info) override;
-  void encode_lock_state(int type, bufferlist& bl) override;
-  void decode_lock_state(int type, const bufferlist& bl) override;
+  void encode_lock_state(int type, ceph::buffer::list& bl) override;
+  void decode_lock_state(int type, const ceph::buffer::list& bl) override;
 
   // ---------------------------------------------
   // replicas (on clients)
@@ -335,9 +328,9 @@ public:
   void remove_client_lease(ClientLease *r, Locker *locker);  // returns remaining mask (if any), and kicks locker eval_gathers
   void remove_client_leases(Locker *locker);
 
-  ostream& print_db_line_prefix(ostream& out) override;
-  void print(ostream& out) override;
-  void dump(Formatter *f) const;
+  std::ostream& print_db_line_prefix(std::ostream& out) override;
+  void print(std::ostream& out) override;
+  void dump(ceph::Formatter *f) const;
 
 
   __u32 hash;
@@ -351,9 +344,10 @@ public:
   static LockType versionlock_type;
 
   SimpleLock lock; // FIXME referenced containers not in mempool
-  LocalLock versionlock; // FIXME referenced containers not in mempool
+  LocalLockC versionlock; // FIXME referenced containers not in mempool
 
   mempool::mds_co::map<client_t,ClientLease*> client_lease_map;
+  std::map<int, std::unique_ptr<BatchOp>> batch_ops;
 
 
 protected:
@@ -375,7 +369,7 @@ private:
   mempool::mds_co::string name;
 };
 
-ostream& operator<<(ostream& out, const CDentry& dn);
+std::ostream& operator<<(std::ostream& out, const CDentry& dn);
 
 
 #endif

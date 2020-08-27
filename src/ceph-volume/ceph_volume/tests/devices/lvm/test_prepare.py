@@ -1,5 +1,6 @@
 import pytest
 from ceph_volume.devices import lvm
+from mock.mock import patch, Mock
 
 
 class TestLVM(object):
@@ -24,10 +25,12 @@ class TestLVM(object):
 
 class TestPrepareDevice(object):
 
-    def test_cannot_use_device(self):
+    def test_cannot_use_device(self, factory):
+        args = factory(data='/dev/var/foo')
         with pytest.raises(RuntimeError) as error:
-            lvm.prepare.Prepare([]).prepare_device(
-                    '/dev/var/foo', 'data', 'asdf', '0')
+            p = lvm.prepare.Prepare([])
+            p.args = args
+            p.prepare_data_device( 'data', '0')
         assert 'Cannot use device (/dev/var/foo)' in str(error.value)
         assert 'A vg/lv path or an existing device is needed' in str(error.value)
 
@@ -68,7 +71,7 @@ class TestPrepare(object):
             lvm.prepare.Prepare(argv=['--data', '/dev/sdfoo', '--filestore', '--bluestore']).main()
         stdout, stderr = capsys.readouterr()
         expected = 'Cannot use --filestore (filestore) with --bluestore (bluestore)'
-        assert expected in stdout
+        assert expected in stderr
 
     def test_excludes_other_filestore_bluestore_flags(self, capsys, device_info):
         device_info()
@@ -79,7 +82,7 @@ class TestPrepare(object):
             ]).main()
         stdout, stderr = capsys.readouterr()
         expected = 'Cannot use --bluestore (bluestore) with --journal (filestore)'
-        assert expected in stdout
+        assert expected in stderr
 
     def test_excludes_block_and_journal_flags(self, capsys, device_info):
         device_info()
@@ -90,7 +93,7 @@ class TestPrepare(object):
             ]).main()
         stdout, stderr = capsys.readouterr()
         expected = 'Cannot use --block.db (bluestore) with --journal (filestore)'
-        assert expected in stdout
+        assert expected in stderr
 
     def test_journal_is_required_with_filestore(self, is_root, monkeypatch, device_info):
         monkeypatch.setattr("os.path.exists", lambda path: True)
@@ -100,21 +103,17 @@ class TestPrepare(object):
         expected = '--journal is required when using --filestore'
         assert expected in str(error.value)
 
-
-class TestGetJournalLV(object):
-
-    @pytest.mark.parametrize('arg', ['', '///', None, '/dev/sda1'])
-    def test_no_journal_on_invalid_path(self, monkeypatch, arg):
-        monkeypatch.setattr(lvm.prepare.api, 'get_lv', lambda **kw: False)
-        prepare = lvm.prepare.Prepare([])
-        assert prepare.get_lv(arg) is None
-
-    def test_no_journal_lv_found(self, monkeypatch):
-        # patch it with 0 so we know we are getting to get_lv
-        monkeypatch.setattr(lvm.prepare.api, 'get_lv', lambda **kw: 0)
-        prepare = lvm.prepare.Prepare([])
-        assert prepare.get_lv('vg/lv') == 0
-
+    @patch('ceph_volume.devices.lvm.prepare.api.is_ceph_device')
+    def test_safe_prepare_osd_already_created(self, m_is_ceph_device):
+        m_is_ceph_device.return_value = True
+        with pytest.raises(RuntimeError) as error:
+            prepare = lvm.prepare.Prepare(argv=[])
+            prepare.args = Mock()
+            prepare.args.data = '/dev/sdfoo'
+            prepare.get_lv = Mock()
+            prepare.safe_prepare()
+            expected = 'skipping {}, it is already prepared'.format('/dev/sdfoo')
+            assert expected in str(error.value)
 
 class TestActivate(object):
 

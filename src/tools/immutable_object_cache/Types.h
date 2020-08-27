@@ -15,7 +15,7 @@ namespace {
 struct HeaderHelper {
   uint8_t v;
   uint8_t c_v;
-  uint32_t len;
+  ceph_le32 len;
 }__attribute__((packed));
 
 inline uint8_t get_header_size() {
@@ -57,13 +57,15 @@ class ObjectCacheRequest {
 
 class ObjectCacheRegData : public ObjectCacheRequest {
  public:
+  std::string version;
   ObjectCacheRegData();
+  ObjectCacheRegData(uint16_t t, uint64_t s, const std::string &version);
   ObjectCacheRegData(uint16_t t, uint64_t s);
   ~ObjectCacheRegData() override;
   void encode_payload() override;
   void decode_payload(bufferlist::const_iterator bl) override;
   uint16_t get_request_type() override { return RBDSC_REGISTER; }
-  bool payload_empty() override { return true; }
+  bool payload_empty() override { return false; }
 };
 
 class ObjectCacheRegReplyData : public ObjectCacheRequest {

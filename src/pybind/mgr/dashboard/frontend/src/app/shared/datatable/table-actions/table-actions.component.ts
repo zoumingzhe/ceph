@@ -1,6 +1,6 @@
 import { Component, Input, OnInit } from '@angular/core';
 
-import * as _ from 'lodash';
+import _ from 'lodash';
 
 import { Icons } from '../../../shared/enum/icons.enum';
 import { CdTableAction } from '../../models/cd-table-action';
@@ -20,7 +20,7 @@ export class TableActionsComponent implements OnInit {
   @Input()
   tableActions: CdTableAction[];
   @Input()
-  btnColor = 'secondary';
+  btnColor = 'accent';
 
   // Use this if you just want to display a drop down button,
   // labeled with the given text, with all actions in it.
@@ -32,8 +32,6 @@ export class TableActionsComponent implements OnInit {
   dropDownActions: CdTableAction[] = [];
 
   icons = Icons;
-
-  constructor() {}
 
   ngOnInit() {
     this.removeActionsWithNoPermissions();
@@ -80,7 +78,7 @@ export class TableActionsComponent implements OnInit {
    */
   getCurrentButton(): CdTableAction {
     if (this.dropDownOnly) {
-      return;
+      return undefined;
     }
     let buttonAction = this.dropDownActions.find((tableAction) => this.showableAction(tableAction));
     if (!buttonAction && this.dropDownActions.length > 0) {
@@ -104,7 +102,7 @@ export class TableActionsComponent implements OnInit {
 
   useRouterLink(action: CdTableAction): string {
     if (!action.routerLink || this.disableSelectionAction(action)) {
-      return;
+      return undefined;
     }
     return _.isString(action.routerLink) ? action.routerLink : action.routerLink();
   }
@@ -148,6 +146,11 @@ export class TableActionsComponent implements OnInit {
   }
 
   useDisableDesc(action: CdTableAction) {
-    return action.disableDesc && action.disableDesc();
+    if (action.disable) {
+      const result = action.disable(this.selection);
+      return _.isString(result) ? result : undefined;
+    }
+
+    return undefined;
   }
 }

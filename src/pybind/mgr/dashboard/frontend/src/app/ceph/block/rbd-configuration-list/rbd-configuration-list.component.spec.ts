@@ -1,15 +1,14 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { FormsModule } from '@angular/forms';
+import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 import { RouterTestingModule } from '@angular/router/testing';
 
+import { NgbDropdownModule, NgbTooltipModule } from '@ng-bootstrap/ng-bootstrap';
 import { NgxDatatableModule } from '@swimlane/ngx-datatable';
 import { ChartsModule } from 'ng2-charts';
-import { AlertModule } from 'ngx-bootstrap/alert';
-import { BsDropdownModule } from 'ngx-bootstrap/dropdown';
 
-import { configureTestBed, i18nProviders } from '../../../../testing/unit-test-helper';
-import { ErrorPanelComponent } from '../../../shared/components/error-panel/error-panel.component';
-import { SparklineComponent } from '../../../shared/components/sparkline/sparkline.component';
+import { configureTestBed } from '../../../../testing/unit-test-helper';
+import { ComponentsModule } from '../../../shared/components/components.module';
 import { TableComponent } from '../../../shared/datatable/table/table.component';
 import { RbdConfigurationEntry } from '../../../shared/models/configuration';
 import { PipesModule } from '../../../shared/pipes/pipes.module';
@@ -23,21 +22,18 @@ describe('RbdConfigurationListComponent', () => {
 
   configureTestBed({
     imports: [
+      BrowserAnimationsModule,
       FormsModule,
       NgxDatatableModule,
       RouterTestingModule,
-      AlertModule,
-      BsDropdownModule.forRoot(),
+      ComponentsModule,
+      NgbDropdownModule,
       ChartsModule,
-      PipesModule
+      PipesModule,
+      NgbTooltipModule
     ],
-    declarations: [
-      RbdConfigurationListComponent,
-      TableComponent,
-      ErrorPanelComponent,
-      SparklineComponent
-    ],
-    providers: [FormatterService, RbdConfigurationService, i18nProviders]
+    declarations: [RbdConfigurationListComponent, TableComponent],
+    providers: [FormatterService, RbdConfigurationService]
   });
 
   beforeEach(() => {
@@ -90,7 +86,7 @@ describe('RbdConfigurationListComponent', () => {
         value: '100'
       }
     ];
-    const filter = (keyword) => {
+    const filter = (keyword: string) => {
       poolConfTable.search = keyword;
       poolConfTable.updateFilter();
       return poolConfTable.rows;

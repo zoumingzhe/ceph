@@ -169,7 +169,7 @@ int execute_prepare(const po::variables_map &vm,
   if (r < 0) {
     return r;
   }
-  io_ctx.set_osdmap_full_try();
+  io_ctx.set_pool_full_try();
 
   std::string dest_pool_name;
   std::string dest_namespace_name;
@@ -189,12 +189,11 @@ int execute_prepare(const po::variables_map &vm,
   }
 
   librados::IoCtx dest_io_ctx;
-  if (!dest_pool_name.empty()) {
-    r = utils::init_io_ctx(rados, dest_pool_name, dest_namespace_name,
-                           &dest_io_ctx);
-    if (r < 0) {
-      return r;
-    }
+  utils::normalize_pool_name(&dest_pool_name);
+  r = utils::init_io_ctx(rados, dest_pool_name, dest_namespace_name,
+                         &dest_io_ctx);
+  if (r < 0) {
+    return r;
   }
 
   r = do_prepare(io_ctx, image_name, dest_pool_name.empty() ? io_ctx :
@@ -232,7 +231,7 @@ int execute_execute(const po::variables_map &vm,
   if (r < 0) {
     return r;
   }
-  io_ctx.set_osdmap_full_try();
+  io_ctx.set_pool_full_try();
 
   r = do_execute(io_ctx, image_name, vm[at::NO_PROGRESS].as<bool>());
   if (r < 0) {
@@ -268,7 +267,7 @@ int execute_abort(const po::variables_map &vm,
   if (r < 0) {
     return r;
   }
-  io_ctx.set_osdmap_full_try();
+  io_ctx.set_pool_full_try();
 
   r = do_abort(io_ctx, image_name, vm[at::NO_PROGRESS].as<bool>());
   if (r < 0) {
@@ -306,7 +305,7 @@ int execute_commit(const po::variables_map &vm,
   if (r < 0) {
     return r;
   }
-  io_ctx.set_osdmap_full_try();
+  io_ctx.set_pool_full_try();
 
   r = do_commit(io_ctx, image_name, vm["force"].as<bool>(),
                 vm[at::NO_PROGRESS].as<bool>());

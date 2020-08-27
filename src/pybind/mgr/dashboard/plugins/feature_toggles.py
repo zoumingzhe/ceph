@@ -4,9 +4,8 @@ from __future__ import absolute_import
 from enum import Enum
 import cherrypy
 from mgr_module import CLICommand, Option
-
 from . import PLUGIN_MANAGER as PM
-from . import interfaces as I
+from . import interfaces as I  # noqa: E741,N812
 from .ttl_cache import ttl_cache
 
 from ..controllers.rbd import Rbd, RbdSnapshot, RbdTrash
@@ -15,6 +14,12 @@ from ..controllers.rbd_mirroring import (
 from ..controllers.iscsi import Iscsi, IscsiTarget
 from ..controllers.cephfs import CephFS
 from ..controllers.rgw import Rgw, RgwDaemon, RgwBucket, RgwUser
+from ..controllers.nfsganesha import NFSGanesha, NFSGaneshaService, NFSGaneshaExports
+
+try:
+    from typing import no_type_check, Set
+except ImportError:
+    no_type_check = object()  # Just for type checking
 
 
 class Features(Enum):
@@ -23,10 +28,10 @@ class Features(Enum):
     ISCSI = 'iscsi'
     CEPHFS = 'cephfs'
     RGW = 'rgw'
+    NFS = 'nfs'
 
 
-PREDISABLED_FEATURES = set()
-
+PREDISABLED_FEATURES = set()  # type: Set[str]
 
 Feature2Controller = {
     Features.RBD: [Rbd, RbdSnapshot, RbdTrash],
@@ -35,6 +40,7 @@ Feature2Controller = {
     Features.ISCSI: [Iscsi, IscsiTarget],
     Features.CEPHFS: [CephFS],
     Features.RGW: [Rgw, RgwDaemon, RgwBucket, RgwUser],
+    Features.NFS: [NFSGanesha, NFSGaneshaService, NFSGaneshaExports],
 }
 
 
@@ -44,8 +50,9 @@ class Actions(Enum):
     STATUS = 'status'
 
 
+# pylint: disable=too-many-ancestors
 @PM.add_plugin
-class FeatureToggles(I.CanMgr, I.CanLog, I.Setupable, I.HasOptions,
+class FeatureToggles(I.CanMgr, I.Setupable, I.HasOptions,
                      I.HasCommands, I.FilterRequest.BeforeHandler,
                      I.HasControllers):
     OPTION_FMT = 'FEATURE_TOGGLE_{}'
@@ -54,10 +61,11 @@ class FeatureToggles(I.CanMgr, I.CanLog, I.Setupable, I.HasOptions,
 
     @PM.add_hook
     def setup(self):
+        # pylint: disable=attribute-defined-outside-init
         self.Controller2Feature = {
             controller: feature
             for feature, controllers in Feature2Controller.items()
-            for controller in controllers}
+            for controller in controllers}  # type: ignore
 
     @PM.add_hook
     def get_options(self):
@@ -94,12 +102,13 @@ class FeatureToggles(I.CanMgr, I.CanLog, I.Setupable, I.HasOptions,
             else:
                 for feature in features or [f.value for f in Features]:
                     enabled = mgr.get_module_option(self.OPTION_FMT.format(feature))
-                    msg += ["Feature '{}': '{}'".format(
+                    msg += ["Feature '{}': {}".format(
                         feature,
                         'enabled' if enabled else 'disabled')]
             return ret, '\n'.join(msg), ''
         return {'handle_command': cmd}
 
+    @no_type_check  # https://github.com/python/mypy/issues/7806
     def _get_feature_from_request(self, request):
         try:
             return self.Controller2Feature[
@@ -108,6 +117,7 @@ class FeatureToggles(I.CanMgr, I.CanLog, I.Setupable, I.HasOptions,
             return None
 
     @ttl_cache(ttl=CACHE_TTL, maxsize=CACHE_MAX_SIZE)
+    @no_type_check  # https://github.com/python/mypy/issues/7806
     def _is_feature_enabled(self, feature):
         return self.mgr.get_module_option(self.OPTION_FMT.format(feature.value))
 
@@ -127,13 +137,25 @@ class FeatureToggles(I.CanMgr, I.CanLog, I.Setupable, I.HasOptions,
 
     @PM.add_hook
     def get_controllers(self):
-        from ..controllers import ApiController, RESTController
+        from ..controllers import ApiController, RESTController, ControllerDoc, EndpointDoc
+
+        FEATURES_SCHEMA = {
+            "rbd": (bool, ''),
+            "mirroring": (bool, ''),
+            "iscsi": (bool, ''),
+            "cephfs": (bool, ''),
+            "rgw": (bool, ''),
+            "nfs": (bool, '')
+        }
 
         @ApiController('/feature_toggles')
+        @ControllerDoc("Manage Features API", "FeatureTogglesEndpoint")
         class FeatureTogglesEndpoint(RESTController):
-
-            def list(_):
+            @EndpointDoc("Get List Of Features",
+                         responses={200: FEATURES_SCHEMA})
+            def list(_):  # pylint: disable=no-self-argument  # noqa: N805
                 return {
+                    # pylint: disable=protected-access
                     feature.value: self._is_feature_enabled(feature)
                     for feature in Features
                 }

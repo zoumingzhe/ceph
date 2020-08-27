@@ -1,8 +1,7 @@
-import { Component } from '@angular/core';
-import { I18n } from '@ngx-translate/i18n-polyfill';
-import { SortDirection, SortPropDir } from '@swimlane/ngx-datatable';
+import { Component, Inject } from '@angular/core';
 
-import { BsModalRef, BsModalService } from 'ngx-bootstrap/modal';
+import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
+import { SortDirection, SortPropDir } from '@swimlane/ngx-datatable';
 import { Observable, Subscriber } from 'rxjs';
 
 import { PrometheusService } from '../../../../shared/api/prometheus.service';
@@ -21,10 +20,12 @@ import { CdTableSelection } from '../../../../shared/models/cd-table-selection';
 import { Permission } from '../../../../shared/models/permissions';
 import { CdDatePipe } from '../../../../shared/pipes/cd-date.pipe';
 import { AuthStorageService } from '../../../../shared/services/auth-storage.service';
+import { ModalService } from '../../../../shared/services/modal.service';
 import { NotificationService } from '../../../../shared/services/notification.service';
 import { URLBuilderService } from '../../../../shared/services/url-builder.service';
+import { PrometheusListHelper } from '../prometheus-list-helper';
 
-const BASE_URL = 'silence';
+const BASE_URL = 'monitoring/silences';
 
 @Component({
   providers: [{ provide: URLBuilderService, useValue: new URLBuilderService(BASE_URL) }],
@@ -32,13 +33,13 @@ const BASE_URL = 'silence';
   templateUrl: './silence-list.component.html',
   styleUrls: ['./silence-list.component.scss']
 })
-export class SilenceListComponent {
+export class SilenceListComponent extends PrometheusListHelper {
   silences: AlertmanagerSilence[] = [];
   columns: CdTableColumn[];
   tableActions: CdTableAction[];
   permission: Permission;
   selection = new CdTableSelection();
-  modalRef: BsModalRef;
+  modalRef: NgbModalRef;
   customCss = {
     'badge badge-danger': 'active',
     'badge badge-warning': 'pending',
@@ -48,15 +49,15 @@ export class SilenceListComponent {
 
   constructor(
     private authStorageService: AuthStorageService,
-    private i18n: I18n,
     private cdDatePipe: CdDatePipe,
-    private prometheusService: PrometheusService,
-    private modalService: BsModalService,
+    private modalService: ModalService,
     private notificationService: NotificationService,
     private urlBuilder: URLBuilderService,
     private actionLabels: ActionLabelsI18n,
-    private succeededLabels: SucceededActionLabelsI18n
+    private succeededLabels: SucceededActionLabelsI18n,
+    @Inject(PrometheusService) prometheusService: PrometheusService
   ) {
+    super(prometheusService);
     this.permission = this.authStorageService.getPermissions().prometheus;
     const selectionExpired = (selection: CdTableSelection) =>
       selection.first() && selection.first().status && selection.first().status.state === 'expired';
@@ -109,32 +110,32 @@ export class SilenceListComponent {
     ];
     this.columns = [
       {
-        name: this.i18n('ID'),
+        name: $localize`ID`,
         prop: 'id',
         flexGrow: 3
       },
       {
-        name: this.i18n('Created by'),
+        name: $localize`Created by`,
         prop: 'createdBy',
         flexGrow: 2
       },
       {
-        name: this.i18n('Started'),
+        name: $localize`Started`,
         prop: 'startsAt',
         pipe: this.cdDatePipe
       },
       {
-        name: this.i18n('Updated'),
+        name: $localize`Updated`,
         prop: 'updatedAt',
         pipe: this.cdDatePipe
       },
       {
-        name: this.i18n('Ends'),
+        name: $localize`Ends`,
         prop: 'endsAt',
         pipe: this.cdDatePipe
       },
       {
-        name: this.i18n('Status'),
+        name: $localize`Status`,
         prop: 'status.state',
         cellTransformation: CellTemplate.classAdding
       }
@@ -160,35 +161,34 @@ export class SilenceListComponent {
 
   expireSilence() {
     const id = this.selection.first().id;
-    const i18nSilence = this.i18n('Silence');
+    const i18nSilence = $localize`Silence`;
     const applicationName = 'Prometheus';
     this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
-      initialState: {
-        itemDescription: i18nSilence,
-        actionDescription: this.actionLabels.EXPIRE,
-        submitActionObservable: () =>
-          new Observable((observer: Subscriber<any>) => {
-            this.prometheusService.expireSilence(id).subscribe(
-              () => {
-                this.notificationService.show(
-                  NotificationType.success,
-                  `${this.succeededLabels.EXPIRED} ${i18nSilence} ${id}`,
-                  undefined,
-                  undefined,
-                  applicationName
-                );
-              },
-              (resp) => {
-                resp['application'] = applicationName;
-                observer.error(resp);
-              },
-              () => {
-                observer.complete();
-                this.refresh();
-              }
-            );
-          })
-      }
+      itemDescription: i18nSilence,
+      itemNames: [id],
+      actionDescription: this.actionLabels.EXPIRE,
+      submitActionObservable: () =>
+        new Observable((observer: Subscriber<any>) => {
+          this.prometheusService.expireSilence(id).subscribe(
+            () => {
+              this.notificationService.show(
+                NotificationType.success,
+                `${this.succeededLabels.EXPIRED} ${i18nSilence} ${id}`,
+                undefined,
+                undefined,
+                applicationName
+              );
+            },
+            (resp) => {
+              resp['application'] = applicationName;
+              observer.error(resp);
+            },
+            () => {
+              observer.complete();
+              this.refresh();
+            }
+          );
+        })
     });
   }
 }

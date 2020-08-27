@@ -22,48 +22,47 @@
 #include <seastar/core/sharded.hh>
 #include <seastar/core/shared_future.hh>
 
+#include "crimson/net/chained_dispatchers.h"
 #include "Messenger.h"
 #include "SocketConnection.h"
 
-namespace ceph::net {
+namespace crimson::net {
 
-class SocketMessenger final : public Messenger, public seastar::peering_sharded_service<SocketMessenger> {
-  const int master_sid;
-  const seastar::shard_id sid;
+class FixedCPUServerSocket;
+
+class SocketMessenger final : public Messenger {
+  const seastar::shard_id master_sid;
   seastar::promise<> shutdown_promise;
 
-  std::optional<seastar::server_socket> listener;
-  Dispatcher *dispatcher = nullptr;
+  FixedCPUServerSocket* listener = nullptr;
+  // as we want to unregister a dispatcher from the messengers when stopping
+  // that dispatcher, we have to use intrusive slist which, when used with
+  // "boost::intrusive::linear<true>", can tolerate ongoing iteration of the
+  // list when removing an element. However, the downside of this is that an
+  // element can only be attached to one slist. So, as we need to make multiple
+  // messenger reference the same set of dispatchers, we have to make them share
+  // the same ChainedDispatchers, which means registering/unregistering an element
+  // to one messenger will affect other messengers that share the same ChainedDispatchers.
+  ChainedDispatchersRef dispatchers;
   std::map<entity_addr_t, SocketConnectionRef> connections;
   std::set<SocketConnectionRef> accepting_conns;
+  std::vector<SocketConnectionRef> closing_conns;
   ceph::net::PolicySet<Throttle> policy_set;
   // Distinguish messengers with meaningful names for debugging
   const std::string logic_name;
   const uint32_t nonce;
-
-  seastar::future<> accept(seastar::connected_socket socket,
-                           seastar::socket_address paddr);
-
-  void do_bind(const entity_addrvec_t& addr);
-
+  // specifying we haven't learned our addr; set false when we find it.
+  bool need_addr = true;
+  uint32_t global_seq = 0;
   bool started = false;
-  seastar::shared_promise<> accepting_complete;
-  seastar::future<> do_start(Dispatcher *disp);
-  seastar::foreign_ptr<ConnectionRef> do_connect(const entity_addr_t& peer_addr,
-                                                 const entity_type_t& peer_type);
-  seastar::future<> do_shutdown();
-  // conn sharding options:
-  // 0. Compatible (master_sid >= 0): place all connections to one master shard
-  // 1. Simplest (master_sid < 0): sharded by ip only
-  // 2. Balanced (not implemented): sharded by ip + port + nonce,
-  //        but, need to move SocketConnection between cores.
-  seastar::shard_id locate_shard(const entity_addr_t& addr);
+
+  seastar::future<> do_bind(const entity_addrvec_t& addr);
 
  public:
   SocketMessenger(const entity_name_t& myname,
                   const std::string& logic_name,
-                  uint32_t nonce,
-                  int master_sid);
+                  uint32_t nonce);
+  ~SocketMessenger() override { ceph_assert(!listener); }
 
   seastar::future<> set_myaddrs(const entity_addrvec_t& addr) override;
 
@@ -74,20 +73,26 @@ class SocketMessenger final : public Messenger, public seastar::peering_sharded_
   seastar::future<> try_bind(const entity_addrvec_t& addr,
                              uint32_t min_port, uint32_t max_port) override;
 
-  seastar::future<> start(Dispatcher *dispatcher) override;
+  seastar::future<> start(ChainedDispatchersRef dispatchers) override;
+  void add_dispatcher(Dispatcher& disp) {
+    dispatchers->push_back(disp);
+  }
 
-  seastar::future<ConnectionXRef> connect(const entity_addr_t& peer_addr,
-                                          const entity_type_t& peer_type) override;
+  ConnectionRef connect(const entity_addr_t& peer_addr,
+                        const entity_name_t& peer_name) override;
   // can only wait once
   seastar::future<> wait() override {
+    assert(seastar::this_shard_id() == master_sid);
     return shutdown_promise.get_future();
   }
 
-  seastar::future<> shutdown() override;
-
-  Messenger* get_local_shard() override {
-    return &container().local();
+  void remove_dispatcher(Dispatcher& disp) override {
+    dispatchers->erase(disp);
   }
+  bool dispatcher_chain_empty() const override {
+    return !dispatchers || dispatchers->empty();
+  }
+  seastar::future<> shutdown() override;
 
   void print(ostream& out) const override {
     out << get_myname()
@@ -106,20 +111,21 @@ class SocketMessenger final : public Messenger, public seastar::peering_sharded_
   void set_policy_throttler(entity_type_t peer_type, Throttle* throttle) override;
 
  public:
-  seastar::future<> learned_addr(const entity_addr_t &peer_addr_for_me);
+  seastar::future<uint32_t> get_global_seq(uint32_t old=0);
+  seastar::future<> learned_addr(const entity_addr_t &peer_addr_for_me,
+                                 const SocketConnection& conn);
 
   SocketConnectionRef lookup_conn(const entity_addr_t& addr);
   void accept_conn(SocketConnectionRef);
   void unaccept_conn(SocketConnectionRef);
   void register_conn(SocketConnectionRef);
   void unregister_conn(SocketConnectionRef);
-
-  // required by sharded<>
-  seastar::future<> stop();
-
+  void closing_conn(SocketConnectionRef);
+  void closed_conn(SocketConnectionRef);
   seastar::shard_id shard_id() const {
-    return sid;
+    assert(seastar::this_shard_id() == master_sid);
+    return master_sid;
   }
 };
 
-} // namespace ceph::net
+} // namespace crimson::net

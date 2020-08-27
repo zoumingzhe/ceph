@@ -24,21 +24,28 @@ namespace io { class AsyncOperation; }
 
 namespace deep_copy {
 
+struct Handler;
+
 template <typename ImageCtxT = librbd::ImageCtx>
 class ObjectCopyRequest {
 public:
   static ObjectCopyRequest* create(ImageCtxT *src_image_ctx,
                                    ImageCtxT *dst_image_ctx,
+                                   librados::snap_t src_snap_id_start,
+                                   librados::snap_t dst_snap_id_start,
                                    const SnapMap &snap_map,
                                    uint64_t object_number, bool flatten,
-                                   Context *on_finish) {
-    return new ObjectCopyRequest(src_image_ctx, dst_image_ctx, snap_map,
-                                 object_number, flatten, on_finish);
+                                   Handler* handler, Context *on_finish) {
+    return new ObjectCopyRequest(src_image_ctx, dst_image_ctx,
+                                 src_snap_id_start, dst_snap_id_start, snap_map,
+                                 object_number, flatten, handler, on_finish);
   }
 
   ObjectCopyRequest(ImageCtxT *src_image_ctx, ImageCtxT *dst_image_ctx,
-                    const SnapMap &snap_map, uint64_t object_number,
-                    bool flatten, Context *on_finish);
+                    librados::snap_t src_snap_id_start,
+                    librados::snap_t dst_snap_id_start, const SnapMap &snap_map,
+                    uint64_t object_number, bool flatten, Handler* handler,
+                    Context *on_finish);
 
   void send();
 
@@ -136,9 +143,12 @@ private:
   ImageCtxT *m_src_image_ctx;
   ImageCtxT *m_dst_image_ctx;
   CephContext *m_cct;
+  librados::snap_t m_src_snap_id_start;
+  librados::snap_t m_dst_snap_id_start;
   SnapMap m_snap_map;
   uint64_t m_dst_object_number;
   bool m_flatten;
+  Handler* m_handler;
   Context *m_on_finish;
 
   decltype(m_src_image_ctx->data_ctx) m_src_io_ctx;
@@ -181,7 +191,7 @@ private:
   void send_update_object_map();
   void handle_update_object_map(int r);
 
-  Context *start_lock_op(RWLock &owner_lock, int* r);
+  Context *start_lock_op(ceph::shared_mutex &owner_lock, int* r);
 
   uint64_t src_to_dst_object_offset(uint64_t objectno, uint64_t offset);
 

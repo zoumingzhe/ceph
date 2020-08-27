@@ -3,11 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ReactiveFormsModule } from '@angular/forms';
 import { By } from '@angular/platform-browser';
 
-import { ComponentLoaderFactory } from 'ngx-bootstrap/component-loader';
-import { PositioningService } from 'ngx-bootstrap/positioning';
-import { TooltipConfig, TooltipModule } from 'ngx-bootstrap/tooltip';
-
-import { configureTestBed, FormHelper, i18nProviders } from '../../../../testing/unit-test-helper';
+import { configureTestBed, FormHelper } from '../../../../testing/unit-test-helper';
 import { DirectivesModule } from '../../../shared/directives/directives.module';
 import { CdFormGroup } from '../../../shared/forms/cd-form-group';
 import { RbdConfigurationSourceField } from '../../../shared/models/configuration';
@@ -24,17 +20,9 @@ describe('RbdConfigurationFormComponent', () => {
   let fh: FormHelper;
 
   configureTestBed({
-    imports: [ReactiveFormsModule, TooltipModule, DirectivesModule, SharedModule],
+    imports: [ReactiveFormsModule, DirectivesModule, SharedModule],
     declarations: [RbdConfigurationFormComponent],
-    providers: [
-      ComponentLoaderFactory,
-      PositioningService,
-      TooltipConfig,
-      RbdConfigurationService,
-      FormatterService,
-      DimlessBinaryPerSecondPipe,
-      i18nProviders
-    ]
+    providers: [RbdConfigurationService, FormatterService, DimlessBinaryPerSecondPipe]
   });
 
   beforeEach(() => {
@@ -43,7 +31,7 @@ describe('RbdConfigurationFormComponent', () => {
     component.form = new CdFormGroup({}, null);
     fh = new FormHelper(component.form);
     fixture.detectChanges();
-    sections = TestBed.get(RbdConfigurationService).sections;
+    sections = TestBed.inject(RbdConfigurationService).sections;
   });
 
   it('should create', () => {
@@ -56,7 +44,7 @@ describe('RbdConfigurationFormComponent', () => {
     const expected = sections
       .map((section) => section.options)
       .reduce((a, b) => a.concat(b))
-      .map((option) => option.name);
+      .map((option: Record<string, any>) => option.name);
     expect(actual).toEqual(expected);
 
     /* Test form creation on a template level */
@@ -85,7 +73,7 @@ describe('RbdConfigurationFormComponent', () => {
 
     it('should return dirty values without any units', () => {
       let dirtyValues = {};
-      component.changes.subscribe((getDirtyValues) => {
+      component.changes.subscribe((getDirtyValues: Function) => {
         dirtyValues = getDirtyValues();
       });
 
@@ -213,7 +201,7 @@ describe('RbdConfigurationFormComponent', () => {
   });
 
   describe('should verify that getDirtyValues() returns correctly', () => {
-    let data;
+    let data: any;
 
     beforeEach(() => {
       component.initializeData = new EventEmitter<any>();
@@ -280,7 +268,7 @@ describe('RbdConfigurationFormComponent', () => {
 
     it('should also return all local values if they do not contain their initial values', () => {
       // Change value for all options
-      data.initialData = data.initialData.map((o) => {
+      data.initialData = data.initialData.map((o: Record<string, any>) => {
         o.value = 22;
         return o;
       });

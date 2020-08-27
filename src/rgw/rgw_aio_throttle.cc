@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -16,7 +16,6 @@
 #include "include/rados/librados.hpp"
 
 #include "rgw_aio_throttle.h"
-#include "rgw_rados.h"
 
 namespace rgw {
 

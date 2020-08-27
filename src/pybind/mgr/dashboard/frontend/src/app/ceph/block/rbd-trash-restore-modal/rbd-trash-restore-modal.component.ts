@@ -1,12 +1,13 @@
 import { Component, OnInit } from '@angular/core';
 
-import { BsModalRef } from 'ngx-bootstrap/modal';
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 
 import { RbdService } from '../../../shared/api/rbd.service';
 import { CdFormBuilder } from '../../../shared/forms/cd-form-builder';
 import { CdFormGroup } from '../../../shared/forms/cd-form-group';
 import { ExecutingTask } from '../../../shared/models/executing-task';
 import { FinishedTask } from '../../../shared/models/finished-task';
+import { ImageSpec } from '../../../shared/models/image-spec';
 import { TaskWrapperService } from '../../../shared/services/task-wrapper.service';
 
 @Component({
@@ -15,9 +16,10 @@ import { TaskWrapperService } from '../../../shared/services/task-wrapper.servic
   styleUrls: ['./rbd-trash-restore-modal.component.scss']
 })
 export class RbdTrashRestoreModalComponent implements OnInit {
-  metaType: string;
   poolName: string;
+  namespace: string;
   imageName: string;
+  imageSpec: string;
   imageId: string;
   executingTasks: ExecutingTask[];
 
@@ -25,12 +27,13 @@ export class RbdTrashRestoreModalComponent implements OnInit {
 
   constructor(
     private rbdService: RbdService,
-    public modalRef: BsModalRef,
+    public activeModal: NgbActiveModal,
     private fb: CdFormBuilder,
     private taskWrapper: TaskWrapperService
   ) {}
 
   ngOnInit() {
+    this.imageSpec = new ImageSpec(this.poolName, this.namespace, this.imageName).toString();
     this.restoreForm = this.fb.group({
       name: this.imageName
     });
@@ -38,24 +41,23 @@ export class RbdTrashRestoreModalComponent implements OnInit {
 
   restore() {
     const name = this.restoreForm.getValue('name');
+    const imageSpec = new ImageSpec(this.poolName, this.namespace, this.imageId);
 
     this.taskWrapper
       .wrapTaskAroundCall({
         task: new FinishedTask('rbd/trash/restore', {
-          pool_name: this.poolName,
-          image_id: this.imageId,
+          image_id_spec: imageSpec.toString(),
           new_image_name: name
         }),
-        call: this.rbdService.restoreTrash(this.poolName, this.imageId, name)
+        call: this.rbdService.restoreTrash(imageSpec, name)
       })
-      .subscribe(
-        undefined,
-        () => {
+      .subscribe({
+        error: () => {
           this.restoreForm.setErrors({ cdSubmitButton: true });
         },
-        () => {
-          this.modalRef.hide();
+        complete: () => {
+          this.activeModal.close();
         }
-      );
+      });
   }
 }

@@ -22,6 +22,7 @@
 #include "common/Formatter.h"
 #include "common/errno.h"
 #include "common/ceph_argparse.h"
+#include "common/url_escape.h"
 
 #include "global/global_init.h"
 
@@ -286,6 +287,122 @@ struct lookup_ghobject : public action_on_object_t {
   }
 };
 
+struct lookup_slow_ghobject : public action_on_object_t {
+  list<tuple<
+    coll_t,
+    ghobject_t,
+    ceph::signedspan,
+    ceph::signedspan,
+    ceph::signedspan,
+    string> > _objects;
+  const string _name;
+  double threshold;
+
+  coll_t last_coll;
+
+  lookup_slow_ghobject(const string& name, double _threshold) :
+    _name(name), threshold(_threshold) { }
+
+  void call(ObjectStore *store, coll_t coll, ghobject_t &ghobj, object_info_t &oi) override {
+    ObjectMap::ObjectMapIterator iter;
+    auto start1 = mono_clock::now();
+    ceph::signedspan first_seek_time = start1 - start1;
+    ceph::signedspan last_seek_time = first_seek_time;
+    ceph::signedspan total_time = first_seek_time;
+    {
+      auto ch = store->open_collection(coll);
+      iter = store->get_omap_iterator(ch, ghobj);
+      if (!iter) {
+	cerr << "omap_get_iterator: " << cpp_strerror(ENOENT)
+	     << " obj:" << ghobj
+	     << std::endl;
+	return;
+      }
+      auto start = mono_clock::now();
+      iter->seek_to_first();
+      first_seek_time = mono_clock::now() - start;
+
+      while(iter->valid()) {
+        start = mono_clock::now();
+	iter->next();
+	last_seek_time = mono_clock::now() - start;
+      }
+    }
+
+    if (coll != last_coll) {
+      cerr << ">>> inspecting coll" << coll << std::endl;
+      last_coll = coll;
+    }
+
+    total_time = mono_clock::now() - start1;
+    if ( total_time >= make_timespan(threshold)) {
+      _objects.emplace_back(coll, ghobj,
+	first_seek_time, last_seek_time, total_time,
+	url_escape(iter->tail_key()));
+      cerr << ">>>>>  found obj " << ghobj
+	   << " first_seek_time "
+	   << std::chrono::duration_cast<std::chrono::seconds>(first_seek_time).count()
+	   << " last_seek_time "
+	   << std::chrono::duration_cast<std::chrono::seconds>(last_seek_time).count()
+	   << " total_time "
+	   << std::chrono::duration_cast<std::chrono::seconds>(total_time).count()
+	   << " tail key: " << url_escape(iter->tail_key())
+	   << std::endl;
+    }
+    return;
+  }
+
+  int size() const {
+    return _objects.size();
+  }
+
+  void dump(Formatter *f, bool human_readable) const {
+    if (!human_readable)
+      f->open_array_section("objects");
+    for (auto i = _objects.begin();
+	 i != _objects.end();
+	 ++i) {
+      f->open_array_section("object");
+      coll_t coll;
+      ghobject_t ghobj;
+      ceph::signedspan first_seek_time;
+      ceph::signedspan last_seek_time;
+      ceph::signedspan total_time;
+      string tail_key;
+      std::tie(coll, ghobj, first_seek_time, last_seek_time, total_time, tail_key) = *i;
+
+      spg_t pgid;
+      bool is_pg = coll.is_pg(&pgid);
+      if (is_pg)
+        f->dump_string("pgid", stringify(pgid));
+      if (!is_pg || !human_readable)
+        f->dump_string("coll", coll.to_str());
+      f->dump_object("ghobject", ghobj);
+      f->open_object_section("times");
+      f->dump_int("first_seek_time",
+	std::chrono::duration_cast<std::chrono::seconds>(first_seek_time).count());
+      f->dump_int("last_seek_time",
+	std::chrono::duration_cast<std::chrono::seconds>
+	  (last_seek_time).count());
+      f->dump_int("total_time",
+	std::chrono::duration_cast<std::chrono::seconds>(total_time).count());
+      f->dump_string("tail_key", tail_key);
+      f->close_section();
+
+      f->close_section();
+      if (human_readable) {
+        f->flush(cout);
+        cout << std::endl;
+      }
+    }
+    if (!human_readable) {
+      f->close_section();
+      f->flush(cout);
+      cout << std::endl;
+    }
+  }
+};
+
 int file_fd = fd_none;
 bool debug;
 bool force = false;
@@ -422,7 +539,7 @@ void wait_until_done(ObjectStore::Transaction* txn, Func&& func)
   bool finished = false;
   std::condition_variable cond;
   std::mutex m;
-  txn->register_on_complete(make_lambda_context([&]() {
+  txn->register_on_complete(make_lambda_context([&](int) {
     std::unique_lock lock{m};
     finished = true;
     cond.notify_one();
@@ -460,16 +577,21 @@ int write_info(ObjectStore::Transaction &t, epoch_t epoch, pg_info_t &info,
   coll_t coll(info.pgid);
   ghobject_t pgmeta_oid(info.pgid.make_pgmeta_oid());
   map<string,bufferlist> km;
+  string key_to_remove;
   pg_info_t last_written_info;
   int ret = prepare_info_keymap(
     g_ceph_context,
-    &km, epoch,
+    &km, &key_to_remove,
+    epoch,
     info,
     last_written_info,
     past_intervals,
     true, true, false);
   if (ret) cerr << "Failed to write info" << std::endl;
   t.omap_setkeys(coll, pgmeta_oid, km);
+  if (!key_to_remove.empty()) {
+    t.omap_rmkey(coll, pgmeta_oid, key_to_remove);
+  }
   return ret;
 }
 
@@ -559,7 +681,7 @@ int do_trim_pg_log(ObjectStore *store, const coll_t &coll,
       try {
 	e.decode_with_checksum(bp);
       } catch (const buffer::error &e) {
-	cerr << "Error reading pg log entry: " << e << std::endl;
+	cerr << "Error reading pg log entry: " << e.what() << std::endl;
       }
       if (debug) {
 	cerr << "read entry " << e << std::endl;
@@ -1855,9 +1977,7 @@ int ObjectStoreTool::do_import(ObjectStore *store, OSDSuperblock& sb,
     cerr << "done, clearing removal flag" << std::endl;
 
   if (!dry_run) {
-    set<string> remove;
-    remove.insert("_remove");
-    t.omap_rmkeys(coll, pgid.make_pgmeta_oid(), remove);
+    t.omap_rmkey(coll, pgid.make_pgmeta_oid(), "_remove");
     wait_until_done(&t, [&] {
       store->queue_transaction(ch, std::move(t));
       // make sure we flush onreadable items before mapper/driver are destroyed.
@@ -1872,6 +1992,23 @@ int do_list(ObjectStore *store, string pgidstr, string object, boost::optional<s
 {
   int r;
   lookup_ghobject lookup(object, nspace, head);
+  if (pgidstr.length() > 0) {
+    r = action_on_all_objects_in_pg(store, pgidstr, lookup, debug);
+  } else {
+    r = action_on_all_objects(store, lookup, debug);
+  }
+  if (r)
+    return r;
+  lookup.dump(formatter, human_readable);
+  formatter->flush(cout);
+  return 0;
+}
+
+int do_list_slow(ObjectStore *store, string pgidstr, string object,
+	    double threshold, Formatter *formatter, bool debug, bool human_readable)
+{
+  int r;
+  lookup_slow_ghobject lookup(object, threshold);
   if (pgidstr.length() > 0) {
     r = action_on_all_objects_in_pg(store, pgidstr, lookup, debug);
   } else {
@@ -1949,7 +2086,9 @@ int do_remove_object(ObjectStore *store, coll_t coll,
     r = get_snapset(store, coll, ghobj, ss, false);
     if (r < 0) {
       cerr << "Can't get snapset error " << cpp_strerror(r) << std::endl;
-      return r;
+      // If --force and bad snapset let them remove the head
+      if (!(force && !all))
+        return r;
     }
 //    cout << "snapset " << ss << std::endl;
     if (!ss.clone_snaps.empty() && !all) {
@@ -2259,9 +2398,6 @@ int do_rm_omap(ObjectStore *store, coll_t coll,
 {
   ObjectStore::Transaction tran;
   ObjectStore::Transaction *t = &tran;
-  set<string> keys;
-
-  keys.insert(key);
 
   if (debug)
     cerr << "Rm_omap " << ghobj << std::endl;
@@ -2269,7 +2405,7 @@ int do_rm_omap(ObjectStore *store, coll_t coll,
   if (dry_run)
     return 0;
 
-  t->omap_rmkeys(coll, ghobj, keys);
+  t->omap_rmkey(coll, ghobj, key);
 
   auto ch = store->open_collection(coll);
   store->queue_transaction(ch, std::move(*t));
@@ -3059,10 +3195,11 @@ int main(int argc, char **argv)
   boost::optional<std::string> nspace;
   spg_t pgid;
   unsigned epoch = 0;
+  unsigned slow_threshold = 16;
   ghobject_t ghobj;
   bool human_readable;
   Formatter *formatter;
-  bool head;
+  bool head, tty;
 
   po::options_description desc("Allowed options");
   desc.add_options()
@@ -3078,8 +3215,8 @@ int main(int argc, char **argv)
     ("pool", po::value<string>(&pool),
      "Pool name, mandatory for apply-layout-settings if --pgid is not specified")
     ("op", po::value<string>(&op),
-     "Arg is one of [info, log, remove, mkfs, fsck, repair, fuse, dup, export, export-remove, import, list, fix-lost, list-pgs, dump-journal, dump-super, meta-list, "
-     "get-osdmap, set-osdmap, get-inc-osdmap, set-inc-osdmap, mark-complete, reset-last-complete, apply-layout-settings, update-mon-db, dump-export, trim-pg-log]")
+     "Arg is one of [info, log, remove, mkfs, fsck, repair, fuse, dup, export, export-remove, import, list, list-slow-omap, fix-lost, list-pgs, dump-journal, dump-super, meta-list, "
+     "get-osdmap, set-osdmap, get-inc-osdmap, set-inc-osdmap, mark-complete, reset-last-complete, apply-layout-settings, update-mon-db, dump-export, trim-pg-log, statfs]")
     ("epoch", po::value<unsigned>(&epoch),
      "epoch# for get-osdmap and get-inc-osdmap, the current epoch in use if not specified")
     ("file", po::value<string>(&file),
@@ -3102,8 +3239,11 @@ int main(int argc, char **argv)
     ("skip-mount-omap", "Disable mounting of omap")
     ("head", "Find head/snapdir when searching for objects by name")
     ("dry-run", "Don't modify the objectstore")
+    ("tty", "Treat stdout as a tty (no binary data)")
     ("namespace", po::value<string>(&argnspace), "Specify namespace when searching for objects")
     ("rmtype", po::value<string>(&rmtypestr), "Specify corrupting object removal 'snapmap' or 'nosnapmap' - TESTING USE ONLY")
+    ("slow-omap-threshold", po::value<unsigned>(&slow_threshold),
+      "Threshold (in seconds) to consider omap listing slow (for op=list-slow-omap)")
     ;
 
   po::options_description positional("Positional options");
@@ -3154,6 +3294,7 @@ int main(int argc, char **argv)
     nspace = argnspace;
 
   dry_run = (vm.count("dry-run") > 0);
+  tty = (vm.count("tty") > 0);
 
   osflagbits_t flags = 0;
   if (dry_run || vm.count("skip-journal-replay"))
@@ -3250,7 +3391,7 @@ int main(int argc, char **argv)
     usage(desc);
     return 1;
   }
-  outistty = isatty(STDOUT_FILENO);
+  outistty = isatty(STDOUT_FILENO) || tty;
 
   file_fd = fd_none;
   if ((op == "export" || op == "export-remove" || op == "get-osdmap" || op == "get-inc-osdmap") && !dry_run) {
@@ -3381,10 +3522,10 @@ int main(int argc, char **argv)
       return 1;
     }
     if (r > 0) {
-      cerr << "fsck found " << r << " errors" << std::endl;
+      cerr << "fsck status: " << r << " remaining error(s) and warning(s)" << std::endl;
       return 1;
     }
-    cout << "fsck found no errors" << std::endl;
+    cout << "fsck success" << std::endl;
     return 0;
   }
   if (op == "repair" || op == "repair-deep") {
@@ -3394,10 +3535,10 @@ int main(int argc, char **argv)
       return 1;
     }
     if (r > 0) {
-      cerr << "repair found " << r << " errors" << std::endl;
+      cerr << "repair status: " << r << " remaining error(s) and warning(s)" << std::endl;
       return 1;
     }
-    cout << "repair found no errors" << std::endl;
+    cout << "repair success" << std::endl;
     return 0;
   }
   if (op == "mkfs") {
@@ -3619,6 +3760,14 @@ int main(int argc, char **argv)
           ret = 1;
           goto out;
         }
+	if (pgidstr != "meta") {
+	  auto ch = fs->open_collection(coll_t(pgid));
+	  if (!ghobj.match(fs->collection_bits(ch), pgid.ps())) {
+	    stringstream ss;
+	    ss << "object " << ghobj << " not contained by pg " << pgid;
+	    throw std::runtime_error(ss.str());
+	  }
+	}
       }
     } catch (std::runtime_error& e) {
       cerr << e.what() << std::endl;
@@ -3771,6 +3920,14 @@ int main(int argc, char **argv)
     }
     goto out;
   }
+  if (op == "list-slow-omap") {
+    ret = do_list_slow(fs, pgidstr, object, slow_threshold, formatter, debug,
+                  human_readable);
+    if (ret < 0) {
+      cerr << "do_list failed: " << cpp_strerror(ret) << std::endl;
+    }
+    goto out;
+  }
 
   if (op == "dump-super") {
     ceph_assert(superblock != nullptr);
@@ -3780,6 +3937,21 @@ int main(int argc, char **argv)
     formatter->flush(cout);
     cout << std::endl;
     goto out;
+  }
+
+  if (op == "statfs") {
+      store_statfs_t statsbuf;
+      ret = fs->statfs(&statsbuf);
+      if (ret < 0) {
+        cerr << "error from statfs: " << cpp_strerror(ret) << std::endl;
+	goto out;
+      }
+      formatter->open_object_section("statfs");
+      statsbuf.dump(formatter);
+      formatter->close_section();
+      formatter->flush(cout);
+      cout << std::endl;
+      goto out;
   }
 
   if (op == "meta-list") {
@@ -3839,7 +4011,7 @@ int main(int argc, char **argv)
   // before complaining about a bad pgid
   if (!vm.count("objcmd") && op != "export" && op != "export-remove" && op != "info" && op != "log" && op != "mark-complete" && op != "trim-pg-log") {
     cerr << "Must provide --op (info, log, remove, mkfs, fsck, repair, export, export-remove, import, list, fix-lost, list-pgs, dump-journal, dump-super, meta-list, "
-      "get-osdmap, set-osdmap, get-inc-osdmap, set-inc-osdmap, mark-complete, reset-last-complete, dump-export, trim-pg-log)"
+      "get-osdmap, set-osdmap, get-inc-osdmap, set-inc-osdmap, mark-complete, reset-last-complete, dump-export, trim-pg-log, statfs)"
 	 << std::endl;
     usage(desc);
     ret = 1;

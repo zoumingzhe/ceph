@@ -30,7 +30,7 @@
 
 
 #ifdef WITH_SEASTAR
-namespace ceph::common {
+namespace crimson::common {
   class ConfigProxy;
 }
 #endif
@@ -426,7 +426,7 @@ public:
    * @param errout std::ostream to send error messages too
    */
 #ifdef WITH_SEASTAR
-  seastar::future<> build_initial(const ceph::common::ConfigProxy& conf, bool for_mkfs);
+  seastar::future<> build_initial(const crimson::common::ConfigProxy& conf, bool for_mkfs);
 #else
   int build_initial(CephContext *cct, bool for_mkfs, std::ostream& errout);
 #endif
@@ -452,9 +452,22 @@ public:
   void print(std::ostream& out) const;
   void print_summary(std::ostream& out) const;
   void dump(ceph::Formatter *f) const;
+  void dump_summary(ceph::Formatter *f) const;
 
   static void generate_test_instances(std::list<MonMap*>& o);
 protected:
+  /**
+   * build a monmap from a list of entity_addrvec_t's
+   *
+   * Give mons dummy names.
+   *
+   * @param addrs  list of entity_addrvec_t's
+   * @param prefix prefix to prepend to generated mon names
+   * @return 0 for success, -errno on error
+   */
+  int init_with_addrs(const std::vector<entity_addrvec_t>& addrs,
+        bool for_mkfs,
+        std::string_view prefix);
   /**
    * build a monmap from a list of ips
    *
@@ -466,7 +479,7 @@ protected:
    */
   int init_with_ips(const std::string& ips,
 		    bool for_mkfs,
-		    const std::string &prefix);
+		    std::string_view prefix);
   /**
    * build a monmap from a list of hostnames
    *
@@ -478,13 +491,13 @@ protected:
    */
   int init_with_hosts(const std::string& hostlist,
 		      bool for_mkfs,
-		      const std::string& prefix);
+		      std::string_view prefix);
   int init_with_config_file(const ConfigProxy& conf, std::ostream& errout);
 #if WITH_SEASTAR
   seastar::future<> read_monmap(const std::string& monmap);
   /// try to build monmap with different settings, like
   /// mon_host, mon* sections, and mon_dns_srv_name
-  seastar::future<> build_monmap(const ceph::common::ConfigProxy& conf, bool for_mkfs);
+  seastar::future<> build_monmap(const crimson::common::ConfigProxy& conf, bool for_mkfs);
   /// initialize monmap by resolving given service name
   seastar::future<> init_with_dns_srv(bool for_mkfs, const std::string& name);
 #else

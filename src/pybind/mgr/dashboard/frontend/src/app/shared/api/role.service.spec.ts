@@ -14,8 +14,8 @@ describe('RoleService', () => {
   });
 
   beforeEach(() => {
-    service = TestBed.get(RoleService);
-    httpTesting = TestBed.get(HttpTestingController);
+    service = TestBed.inject(RoleService);
+    httpTesting = TestBed.inject(HttpTestingController);
   });
 
   afterEach(() => {
@@ -42,6 +42,12 @@ describe('RoleService', () => {
     service.get('role1').subscribe();
     const req = httpTesting.expectOne('api/role/role1');
     expect(req.request.method).toBe('GET');
+  });
+
+  it('should call clone', () => {
+    service.clone('foo', 'bar').subscribe();
+    const req = httpTesting.expectOne('api/role/foo/clone?new_name=bar');
+    expect(req.request.method).toBe('POST');
   });
 
   it('should check if role name exists', () => {

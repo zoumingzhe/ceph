@@ -5,7 +5,7 @@
 #define CEPH_LIBRBD_CACHE_OBJECT_CACHER_OBJECT_DISPATCH_H
 
 #include "librbd/io/ObjectDispatchInterface.h"
-#include "common/Mutex.h"
+#include "common/ceph_mutex.h"
 #include "osdc/ObjectCacher.h"
 
 struct WritebackHandler;
@@ -34,7 +34,7 @@ public:
                              bool writethrough_until_flush);
   ~ObjectCacherObjectDispatch() override;
 
-  io::ObjectDispatchLayer get_object_dispatch_layer() const override {
+  io::ObjectDispatchLayer get_dispatch_layer() const override {
     return io::OBJECT_DISPATCH_LAYER_CACHE;
   }
 
@@ -42,10 +42,10 @@ public:
   void shut_down(Context* on_finish) override;
 
   bool read(
-      uint64_t object_no, uint64_t object_off, uint64_t object_len,
-      librados::snap_t snap_id, int op_flags,
-      const ZTracer::Trace &parent_trace, ceph::bufferlist* read_data,
-      io::ExtentMap* extent_map, int* object_dispatch_flags,
+      uint64_t object_no, const io::Extents &extents, librados::snap_t snap_id,
+      int op_flags, const ZTracer::Trace &parent_trace,
+      ceph::bufferlist* read_data, io::Extents* extent_map,
+      uint64_t* version, int* object_dispatch_flags,
       io::DispatchResult* dispatch_result, Context** on_finish,
       Context* on_dispatched) override;
 
@@ -58,7 +58,8 @@ public:
 
   bool write(
       uint64_t object_no, uint64_t object_off, ceph::bufferlist&& data,
-      const ::SnapContext &snapc, int op_flags,
+      const ::SnapContext &snapc, int op_flags, int write_flags,
+      std::optional<uint64_t> assert_version,
       const ZTracer::Trace &parent_trace, int* object_dispatch_flags,
       uint64_t* journal_tid, io::DispatchResult* dispatch_result,
       Context** on_finish, Context* on_dispatched) override;
@@ -99,7 +100,7 @@ private:
   size_t m_max_dirty;
   bool m_writethrough_until_flush;
 
-  Mutex m_cache_lock;
+  ceph::mutex m_cache_lock;
   ObjectCacher *m_object_cacher = nullptr;
   ObjectCacher::ObjectSet *m_object_set = nullptr;
 

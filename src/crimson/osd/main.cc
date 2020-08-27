@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <iostream>
+#include <random>
 
 #include <seastar/core/app-template.hh>
 #include <seastar/core/print.hh>
@@ -15,13 +16,12 @@
 #include "common/ceph_argparse.h"
 #include "crimson/common/buffer_io.h"
 #include "crimson/common/config_proxy.h"
-#include "crimson/net/SocketMessenger.h"
+#include "crimson/net/Messenger.h"
 #include "global/pidfile.h"
 
 #include "osd.h"
 
-using config_t = ceph::common::ConfigProxy;
-namespace fs = seastar::compat::filesystem;
+using config_t = crimson::common::ConfigProxy;
 
 void usage(const char* prog) {
   std::cout << "usage: " << prog << " -i <ID>\n"
@@ -76,7 +76,7 @@ auto partition_args(seastar::app_template& app, char** argv_begin, char** argv_e
   return make_pair(std::move(ceph_args), std::move(app_args));
 }
 
-using ceph::common::local_conf;
+using crimson::common::local_conf;
 
 seastar::future<> make_keyring()
 {
@@ -97,12 +97,24 @@ seastar::future<> make_keyring()
       keyring.encode_plaintext(bl);
       const auto permissions = (seastar::file_permissions::user_read |
                               seastar::file_permissions::user_write);
-      return ceph::buffer::write_file(std::move(bl), path, permissions);
+      return crimson::write_file(std::move(bl), path, permissions);
     }
-  }).handle_exception_type([path](const fs::filesystem_error& e) {
+  }).handle_exception_type([path](const std::filesystem::filesystem_error& e) {
     seastar::fprint(std::cerr, "FATAL: writing new keyring to %s: %s\n", path, e.what());
     throw e;
   });
+}
+
+uint64_t get_nonce()
+{
+  if (auto pid = getpid(); pid != 1) {
+    return pid;
+  } else {
+    // we're running in a container; use a random number instead!
+    std::random_device rd;
+    std::default_random_engine rng{rd()};
+    return std::uniform_int_distribution<uint64_t>{}(rng);
+  }
 }
 
 int main(int argc, char* argv[])
@@ -120,7 +132,7 @@ int main(int argc, char* argv[])
     usage(argv[0]);
     return EXIT_SUCCESS;
   }
-  std::string cluster_name;
+  std::string cluster_name{"ceph"};
   std::string conf_file_list;
   // ceph_argparse_early_args() could _exit(), while local_conf() won't ready
   // until it's started. so do the boilerplate-settings parsing here.
@@ -128,13 +140,12 @@ int main(int argc, char* argv[])
                                               CEPH_ENTITY_TYPE_OSD,
                                               &cluster_name,
                                               &conf_file_list);
-  seastar::sharded<ceph::osd::OSD> osd;
-  seastar::sharded<ceph::net::SocketMessenger> cluster_msgr, client_msgr;
-  seastar::sharded<ceph::net::SocketMessenger> hb_front_msgr, hb_back_msgr;
-  using ceph::common::sharded_conf;
-  using ceph::common::sharded_perf_coll;
+  seastar::sharded<crimson::osd::OSD> osd;
+  using crimson::common::sharded_conf;
+  using crimson::common::sharded_perf_coll;
   try {
-    return app.run_deprecated(app_args.size(), const_cast<char**>(app_args.data()), [&] {
+    return app.run_deprecated(app_args.size(), const_cast<char**>(app_args.data()),
+      [&, &ceph_args=ceph_args] {
       auto& config = app.configuration();
       return seastar::async([&] {
 	if (config.count("debug")) {
@@ -152,36 +163,36 @@ int main(int argc, char* argv[])
         });
         local_conf().parse_config_files(conf_file_list).get();
         local_conf().parse_argv(ceph_args).get();
-        pidfile_write(local_conf()->pid_file);
+        if (const auto ret = pidfile_write(local_conf()->pid_file);
+            ret == -EACCES || ret == -EAGAIN) {
+          ceph_abort_msg(
+            "likely there is another crimson-osd instance with the same id");
+        } else if (ret < 0) {
+          ceph_abort_msg(fmt::format("pidfile_write failed with {} {}",
+                                     ret, cpp_strerror(-ret)));
+        }
+        // just ignore SIGHUP, we don't reread settings
+        seastar::engine().handle_signal(SIGHUP, [] {});
         const int whoami = std::stoi(local_conf()->name.get_id());
-        const auto nonce = static_cast<uint32_t>(getpid());
+        const auto nonce = get_nonce();
+        crimson::net::MessengerRef cluster_msgr, client_msgr;
+        crimson::net::MessengerRef hb_front_msgr, hb_back_msgr;
         for (auto [msgr, name] : {make_pair(std::ref(cluster_msgr), "cluster"s),
                                   make_pair(std::ref(client_msgr), "client"s),
                                   make_pair(std::ref(hb_front_msgr), "hb_front"s),
                                   make_pair(std::ref(hb_back_msgr), "hb_back"s)}) {
-          const auto shard = seastar::engine().cpu_id();
-          msgr.start(entity_name_t::OSD(whoami), name, nonce, shard).get();
+          msgr = crimson::net::Messenger::create(entity_name_t::OSD(whoami), name,
+                                                 nonce);
           if (local_conf()->ms_crc_data) {
-            msgr.local().set_crc_data();
+            msgr->set_crc_data();
           }
           if (local_conf()->ms_crc_header) {
-            msgr.local().set_crc_header();
+            msgr->set_crc_header();
           }
         }
         osd.start_single(whoami, nonce,
-          reference_wrapper<ceph::net::Messenger>(cluster_msgr.local()),
-          reference_wrapper<ceph::net::Messenger>(client_msgr.local()),
-          reference_wrapper<ceph::net::Messenger>(hb_front_msgr.local()),
-          reference_wrapper<ceph::net::Messenger>(hb_back_msgr.local())).get();
-        seastar::engine().at_exit([&] {
-          return osd.stop();
-        });
-        seastar::engine().at_exit([&] {
-          return seastar::when_all_succeed(cluster_msgr.stop(),
-                                           client_msgr.stop(),
-                                           hb_front_msgr.stop(),
-                                           hb_back_msgr.stop());
-        });
+                         cluster_msgr, client_msgr,
+                         hb_front_msgr, hb_back_msgr).get();
         if (config.count("mkkey")) {
           make_keyring().handle_exception([](std::exception_ptr) {
             seastar::engine().exit(1);
@@ -190,14 +201,17 @@ int main(int argc, char* argv[])
         if (config.count("mkfs")) {
           osd.invoke_on(
 	    0,
-	    &ceph::osd::OSD::mkfs,
+	    &crimson::osd::OSD::mkfs,
 	    local_conf().get_val<uuid_d>("osd_uuid"),
 	    local_conf().get_val<uuid_d>("fsid")).get();
         }
+        seastar::engine().at_exit([&] {
+          return osd.stop();
+        });
         if (config.count("mkkey") || config.count("mkfs")) {
           seastar::engine().exit(0);
         } else {
-          osd.invoke_on(0, &ceph::osd::OSD::start).get();
+          osd.invoke_on(0, &crimson::osd::OSD::start).get();
         }
       });
     });

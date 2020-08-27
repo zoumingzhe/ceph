@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 smarttab ft=cpp
 
 #include <errno.h>
 
@@ -12,7 +12,6 @@
 #include "include/stringify.h"
 
 #include "rgw_common.h"
-#include "rgw_rados.h"
 #include "rgw_tools.h"
 #include "rgw_acl_s3.h"
 #include "rgw_op.h"
@@ -23,6 +22,7 @@
 #include "osd/osd_types.h"
 
 #include "services/svc_sys_obj.h"
+#include "services/svc_zone.h"
 #include "services/svc_zone_utils.h"
 
 #define dout_subsys ceph_subsys_rgw
@@ -81,9 +81,20 @@ int rgw_init_ioctx(librados::Rados *rados, const rgw_pool& pool,
 	pool.name + "\", \"var\": \"pg_num_min\", \"val\": \"" +
 	stringify(min) + "\"}",
 	inbl, NULL, NULL);
-     if (r < 0) {
-       dout(10) << __func__ << " warning: failed to set pg_num_min on "
-		<< pool.name << dendl;
+      if (r < 0) {
+	dout(10) << __func__ << " warning: failed to set pg_num_min on "
+		 << pool.name << dendl;
+      }
+      // set recovery_priority
+      int p = g_conf().get_val<uint64_t>("rgw_rados_pool_recovery_priority");
+      r = rados->mon_command(
+	"{\"prefix\": \"osd pool set\", \"pool\": \"" +
+	pool.name + "\", \"var\": \"recovery_priority\": \"" +
+	stringify(p) + "\"}",
+	inbl, NULL, NULL);
+      if (r < 0) {
+	dout(10) << __func__ << " warning: failed to set recovery_priority on "
+		 << pool.name << dendl;
       }
     }
   } else if (r < 0) {
@@ -95,8 +106,54 @@ int rgw_init_ioctx(librados::Rados *rados, const rgw_pool& pool,
   return 0;
 }
 
-int rgw_put_system_obj(RGWRados *rgwstore, const rgw_pool& pool, const string& oid, bufferlist& data, bool exclusive,
-                       RGWObjVersionTracker *objv_tracker, real_time set_mtime, map<string, bufferlist> *pattrs)
+void rgw_shard_name(const string& prefix, unsigned max_shards, const string& key, string& name, int *shard_id)
+{
+  uint32_t val = ceph_str_hash_linux(key.c_str(), key.size());
+  char buf[16];
+  if (shard_id) {
+    *shard_id = val % max_shards;
+  }
+  snprintf(buf, sizeof(buf), "%u", (unsigned)(val % max_shards));
+  name = prefix + buf;
+}
+
+void rgw_shard_name(const string& prefix, unsigned max_shards, const string& section, const string& key, string& name)
+{
+  uint32_t val = ceph_str_hash_linux(key.c_str(), key.size());
+  val ^= ceph_str_hash_linux(section.c_str(), section.size());
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%u", (unsigned)(val % max_shards));
+  name = prefix + buf;
+}
+
+void rgw_shard_name(const string& prefix, unsigned shard_id, string& name)
+{
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%u", shard_id);
+  name = prefix + buf;
+}
+
+int rgw_parse_list_of_flags(struct rgw_name_to_flag *mapping,
+			    const string& str, uint32_t *perm)
+{
+  list<string> strs;
+  get_str_list(str, strs);
+  list<string>::iterator iter;
+  uint32_t v = 0;
+  for (iter = strs.begin(); iter != strs.end(); ++iter) {
+    string& s = *iter;
+    for (int i = 0; mapping[i].type_name; i++) {
+      if (s.compare(mapping[i].type_name) == 0)
+        v |= mapping[i].flag;
+    }
+  }
+
+  *perm = v;
+  return 0;
+}
+
+int rgw_put_system_obj(RGWSysObjectCtx& obj_ctx, const rgw_pool& pool, const string& oid, bufferlist& data, bool exclusive,
+                       RGWObjVersionTracker *objv_tracker, real_time set_mtime, optional_yield y, map<string, bufferlist> *pattrs)
 {
   map<string,bufferlist> no_attrs;
   if (!pattrs) {
@@ -105,33 +162,28 @@ int rgw_put_system_obj(RGWRados *rgwstore, const rgw_pool& pool, const string& o
 
   rgw_raw_obj obj(pool, oid);
 
-  auto obj_ctx = rgwstore->svc.sysobj->init_obj_ctx();
   auto sysobj = obj_ctx.get_obj(obj);
   int ret = sysobj.wop()
                   .set_objv_tracker(objv_tracker)
                   .set_exclusive(exclusive)
                   .set_mtime(set_mtime)
                   .set_attrs(*pattrs)
-                  .write(data, null_yield);
-
-  if (ret == -ENOENT) {
-    ret = rgwstore->create_pool(pool);
-    if (ret >= 0) {
-      ret = sysobj.wop()
-                  .set_objv_tracker(objv_tracker)
-                  .set_exclusive(exclusive)
-                  .set_mtime(set_mtime)
-                  .set_attrs(*pattrs)
-                  .write(data, null_yield);
-    }
-  }
+                  .write(data, y);
 
   return ret;
 }
 
-int rgw_get_system_obj(RGWRados *rgwstore, RGWSysObjectCtx& obj_ctx, const rgw_pool& pool, const string& key, bufferlist& bl,
+int rgw_put_system_obj(RGWSysObjectCtx& obj_ctx, const rgw_pool& pool, const string& oid, bufferlist& data, bool exclusive,
+                       RGWObjVersionTracker *objv_tracker, real_time set_mtime, map<string, bufferlist> *pattrs)
+{
+  return rgw_put_system_obj(obj_ctx, pool, oid, data, exclusive,
+                            objv_tracker, set_mtime, null_yield, pattrs);
+}
+
+int rgw_get_system_obj(RGWSysObjectCtx& obj_ctx, const rgw_pool& pool, const string& key, bufferlist& bl,
                        RGWObjVersionTracker *objv_tracker, real_time *pmtime, optional_yield y, map<string, bufferlist> *pattrs,
-                       rgw_cache_entry_info *cache_info, boost::optional<obj_version> refresh_version)
+                       rgw_cache_entry_info *cache_info,
+		       boost::optional<obj_version> refresh_version)
 {
   bufferlist::iterator iter;
   int request_len = READ_CHUNK_LEN;
@@ -180,10 +232,10 @@ int rgw_get_system_obj(RGWRados *rgwstore, RGWSysObjectCtx& obj_ctx, const rgw_p
   return 0;
 }
 
-int rgw_delete_system_obj(RGWRados *rgwstore, const rgw_pool& pool, const string& oid,
+int rgw_delete_system_obj(RGWSI_SysObj *sysobj_svc, const rgw_pool& pool, const string& oid,
                           RGWObjVersionTracker *objv_tracker)
 {
-  auto obj_ctx = rgwstore->svc.sysobj->init_obj_ctx();
+  auto obj_ctx = sysobj_svc->init_obj_ctx();
   auto sysobj = obj_ctx.get_obj(rgw_raw_obj{pool, oid});
   rgw_raw_obj obj(pool, oid);
   return sysobj.wop()
@@ -195,7 +247,7 @@ thread_local bool is_asio_thread = false;
 
 int rgw_rados_operate(librados::IoCtx& ioctx, const std::string& oid,
                       librados::ObjectReadOperation *op, bufferlist* pbl,
-                      optional_yield y)
+                      optional_yield y, int flags)
 {
 #ifdef HAVE_BOOST_CONTEXT
   // given a yield_context, call async_operate() to yield the coroutine instead
@@ -204,7 +256,8 @@ int rgw_rados_operate(librados::IoCtx& ioctx, const std::string& oid,
     auto& context = y.get_io_context();
     auto& yield = y.get_yield_context();
     boost::system::error_code ec;
-    auto bl = librados::async_operate(context, ioctx, oid, op, 0, yield[ec]);
+    auto bl = librados::async_operate(
+      context, ioctx, oid, op, flags, yield[ec]);
     if (pbl) {
       *pbl = std::move(bl);
     }
@@ -215,25 +268,26 @@ int rgw_rados_operate(librados::IoCtx& ioctx, const std::string& oid,
     dout(20) << "WARNING: blocking librados call" << dendl;
   }
 #endif
-  return ioctx.operate(oid, op, nullptr);
+  return ioctx.operate(oid, op, nullptr, flags);
 }
 
 int rgw_rados_operate(librados::IoCtx& ioctx, const std::string& oid,
-                      librados::ObjectWriteOperation *op, optional_yield y)
+                      librados::ObjectWriteOperation *op, optional_yield y,
+		      int flags)
 {
 #ifdef HAVE_BOOST_CONTEXT
   if (y) {
     auto& context = y.get_io_context();
     auto& yield = y.get_yield_context();
     boost::system::error_code ec;
-    librados::async_operate(context, ioctx, oid, op, 0, yield[ec]);
+    librados::async_operate(context, ioctx, oid, op, flags, yield[ec]);
     return -ec.value();
   }
   if (is_asio_thread) {
     dout(20) << "WARNING: blocking librados call" << dendl;
   }
 #endif
-  return ioctx.operate(oid, op);
+  return ioctx.operate(oid, op, flags);
 }
 
 int rgw_rados_notify(librados::IoCtx& ioctx, const std::string& oid,
@@ -365,9 +419,9 @@ void rgw_filter_attrset(map<string, bufferlist>& unfiltered_attrset, const strin
   }
 }
 
-RGWDataAccess::RGWDataAccess(RGWRados *_store) : store(_store)
+RGWDataAccess::RGWDataAccess(rgw::sal::RGWRadosStore *_store) : store(_store)
 {
-  sysobj_ctx = std::make_unique<RGWSysObjectCtx>(store->svc.sysobj->init_obj_ctx());
+  sysobj_ctx = std::make_unique<RGWSysObjectCtx>(store->svc()->sysobj->init_obj_ctx());
 }
 
 
@@ -390,7 +444,7 @@ int RGWDataAccess::Bucket::finish_init()
 
 int RGWDataAccess::Bucket::init()
 {
-  int ret = sd->store->get_bucket_info(*sd->sysobj_ctx,
+  int ret = sd->store->getRados()->get_bucket_info(sd->store->svc(),
 				       tenant, name,
 				       bucket_info,
 				       &mtime,
@@ -423,7 +477,7 @@ int RGWDataAccess::Object::put(bufferlist& data,
                                const DoutPrefixProvider *dpp,
                                optional_yield y)
 {
-  RGWRados *store = sd->store;
+  rgw::sal::RGWRadosStore *store = sd->store;
   CephContext *cct = store->ctx();
 
   string tag;
@@ -434,15 +488,17 @@ int RGWDataAccess::Object::put(bufferlist& data,
   rgw::BlockingAioThrottle aio(store->ctx()->_conf->rgw_put_obj_min_window_size);
 
   RGWObjectCtx obj_ctx(store);
-  rgw_obj obj(bucket_info.bucket, key);
+  std::unique_ptr<rgw::sal::RGWBucket> b;
+  store->get_bucket(NULL, bucket_info, &b);
+  std::unique_ptr<rgw::sal::RGWObject> obj = b->get_object(key);
 
   auto& owner = bucket->policy.get_owner();
 
-  string req_id = store->svc.zone_utils->unique_id(store->get_new_req_id());
+  string req_id = store->svc()->zone_utils->unique_id(store->getRados()->get_new_req_id());
 
   using namespace rgw::putobj;
-  AtomicObjectProcessor processor(&aio, store, bucket_info, nullptr,
-                                  owner.get_id(), obj_ctx, obj, olh_epoch,
+  AtomicObjectProcessor processor(&aio, store, b.get(), nullptr,
+                                  owner.get_id(), obj_ctx, obj->get_obj(), olh_epoch,
                                   req_id, dpp, y);
 
   int ret = processor.prepare(y);
@@ -454,7 +510,7 @@ int RGWDataAccess::Object::put(bufferlist& data,
   CompressorRef plugin;
   boost::optional<RGWPutObj_Compress> compressor;
 
-  const auto& compression_type = store->svc.zone->get_zone_params().get_compression_type(bucket_info.placement_rule);
+  const auto& compression_type = store->svc()->zone->get_zone_params().get_compression_type(bucket_info.placement_rule);
   if (compression_type != "none") {
     plugin = Compressor::create(store->ctx(), compression_type);
     if (!plugin) {

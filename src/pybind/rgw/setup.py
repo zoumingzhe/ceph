@@ -1,7 +1,14 @@
 from __future__ import print_function
+import pkgutil
+if not pkgutil.find_loader('setuptools'):
+    from distutils.core import setup
+    from distutils.extension import Extension
+else:
+    from setuptools import setup
+    from setuptools.extension import Extension
+import distutils.core
 
 import os
-import pkgutil
 import shutil
 import subprocess
 import sys
@@ -9,41 +16,41 @@ import tempfile
 import textwrap
 from distutils.ccompiler import new_compiler
 from distutils.errors import CompileError, LinkError
+from itertools import filterfalse, takewhile
 import distutils.sysconfig
 
-unwrapped_customize = distutils.sysconfig.customize_compiler
 
-clang = False
+def filter_unsupported_flags(compiler, flags):
+    args = takewhile(lambda argv: not argv.startswith('-'), [compiler] + flags)
+    if any('clang' in arg for arg in args):
+        return list(filterfalse(lambda f:
+                                f in ('-mcet',
+                                      '-fstack-clash-protection',
+                                      '-fno-var-tracking-assignments',
+                                      '-Wno-deprecated-register',
+                                      '-Wno-gnu-designator') or
+                                f.startswith('-fcf-protection'),
+                                flags))
+    else:
+        return flags
 
-def filter_unsupported_flags(flags):
-    if clang:
-        return [f for f in flags if not (f == '-mcet' or
-                                         f.startswith('-fcf-protection') or
-                                         f == '-fstack-clash-protection')]
-    return flags
 
-def monkey_with_compiler(compiler):
-    unwrapped_customize(compiler)
-    if compiler.compiler_type == 'unix':
-        if compiler.compiler[0].find('clang') != -1:
-            global clang
-            clang = True
-            compiler.compiler = filter_unsupported_flags(compiler.compiler)
-            compiler.compiler_so = filter_unsupported_flags(
-                compiler.compiler_so)
+def monkey_with_compiler(customize):
+    def patched(compiler):
+        customize(compiler)
+        if compiler.compiler_type != 'unix':
+            return
+        compiler.compiler[1:] = \
+            filter_unsupported_flags(compiler.compiler[0],
+                                     compiler.compiler[1:])
+        compiler.compiler_so[1:] = \
+            filter_unsupported_flags(compiler.compiler_so[0],
+                                     compiler.compiler_so[1:])
+    return patched
 
-# See what you made me do?
 
-distutils.sysconfig.customize_compiler = monkey_with_compiler
-
-import distutils.core
-
-if not pkgutil.find_loader('setuptools'):
-    from distutils.core import setup
-    from distutils.extension import Extension
-else:
-    from setuptools import setup
-    from setuptools.extension import Extension
+distutils.sysconfig.customize_compiler = \
+    monkey_with_compiler(distutils.sysconfig.customize_compiler)
 
 # PEP 440 versioning of the RGW package on PyPI
 # Bump this version, after every changeset
@@ -54,13 +61,20 @@ __version__ = '2.0.0'
 def get_python_flags(libs):
     py_libs = sum((libs.split() for libs in
                    distutils.sysconfig.get_config_vars('LIBS', 'SYSLIBS')), [])
+    ldflags = list(filterfalse(lambda lib: lib.startswith('-l'), py_libs))
+    py_libs = [lib.replace('-l', '') for lib in
+               filter(lambda lib: lib.startswith('-l'), py_libs)]
+    compiler = new_compiler()
+    distutils.sysconfig.customize_compiler(compiler)
     return dict(
         include_dirs=[distutils.sysconfig.get_python_inc()],
         library_dirs=distutils.sysconfig.get_config_vars('LIBDIR', 'LIBPL'),
-        libraries=libs + [lib.replace('-l', '') for lib in py_libs],
-        extra_compile_args=distutils.sysconfig.get_config_var('CFLAGS').split(),
+        libraries=libs + py_libs,
+        extra_compile_args=filter_unsupported_flags(
+            compiler.compiler[0],
+            compiler.compiler[1:] + distutils.sysconfig.get_config_var('CFLAGS').split()),
         extra_link_args=(distutils.sysconfig.get_config_var('LDFLAGS').split() +
-                         distutils.sysconfig.get_config_var('LINKFORSHARED').split()))
+                         ldflags))
 
 
 def check_sanity():
@@ -91,13 +105,11 @@ def check_sanity():
     compiler = new_compiler()
     distutils.sysconfig.customize_compiler(compiler)
 
-    if {'MAKEFLAGS', 'MFLAGS', 'MAKELEVEL'}.issubset(set(os.environ.keys())):
+    if 'CEPH_LIBDIR' in os.environ:
         # The setup.py has been invoked by a top-level Ceph make.
         # Set the appropriate CFLAGS and LDFLAGS
-
         compiler.set_include_dirs([os.path.join(CEPH_SRC_DIR, 'include')])
         compiler.set_library_dirs([os.environ.get('CEPH_LIBDIR')])
-
     try:
         compiler.define_macro('_FILE_OFFSET_BITS', '64')
 
@@ -193,9 +205,7 @@ setup(
         'License :: OSI Approved :: GNU Lesser General Public License v2 or later (LGPLv2+)',
         'Operating System :: POSIX :: Linux',
         'Programming Language :: Cython',
-        'Programming Language :: Python :: 2.7',
-        'Programming Language :: Python :: 3.4',
-        'Programming Language :: Python :: 3.5'
+        'Programming Language :: Python :: 3',
     ],
     cmdclass=cmdclass,
 )

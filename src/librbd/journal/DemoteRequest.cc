@@ -4,12 +4,12 @@
 #include "librbd/journal/DemoteRequest.h"
 #include "common/dout.h"
 #include "common/errno.h"
-#include "common/WorkQueue.h"
 #include "journal/Journaler.h"
 #include "journal/Settings.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Journal.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
 #include "librbd/journal/OpenRequest.h"
 
 #define dout_subsys ceph_subsys_rbd
@@ -26,7 +26,7 @@ using librbd::util::create_context_callback;
 template <typename I>
 DemoteRequest<I>::DemoteRequest(I &image_ctx, Context *on_finish)
   : m_image_ctx(image_ctx), m_on_finish(on_finish),
-    m_lock("DemoteRequest::m_lock") {
+    m_lock(ceph::make_mutex("DemoteRequest::m_lock")) {
 }
 
 template <typename I>
